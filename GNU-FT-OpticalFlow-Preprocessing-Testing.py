@@ -41,24 +41,26 @@ upper_bound = np.array([10, 255, 255])
 
 # Fields
 _fps = 30
-_bgr_color_ref_path = "reference.png"
 
-def get_bgr_from_reference_image(image_path):
-    image = cv2.imread(image_path)
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    return np.mean(image_rgb, axis=(0, 1))
-
-# Get the average BGR color from the reference image
-bgr_color_ref = get_bgr_from_reference_image(_bgr_color_ref_path)
-
+# OLD (ref color for HSV isolation)
+# _bgr_color_ref_path = "reference.png"
+# 
+# def get_bgr_from_reference_image(image_path):
+#     image = cv2.imread(image_path)
+#     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+#     return np.mean(image_rgb, axis=(0, 1))
+# 
+# # Get the average BGR color from the reference image
+# bgr_color_ref = get_bgr_from_reference_image(_bgr_color_ref_path)
+#
 # Convert the average BGR color to HSV
-average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_ref[2]]]])
-_average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
-
+# average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_ref[2]]]])
+# _average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
+#
 # print the r,g,b vals
-print(f"Average BGR color: {bgr_color_ref}")
+# print(f"Average BGR color: {bgr_color_ref}")
 # print the h,s,v vals
-print(f"Average HSV color: {_average_color_hsv}")
+# print(f"Average HSV color: {_average_color_hsv}")
 
 CombinedGridFrame = None
 TOTAL_FRAMES = 4
@@ -336,6 +338,95 @@ def downscale_image(image, levels):
 
 
 # =====================================================
+# ============== REF COLOR SAMPLING ===================
+# Sample colors in the image to prepare detection
+# =====================================================
+
+from scipy import stats
+import os
+
+def init_sample_skin_tone(frame, face_landmarks):
+    '''
+    Samples skin tone from specific face landmark sets, dynamically determining the skin tone range.
+    Optionally saves a debug image of the determined skin color.
+    '''
+    """
+    Sets:
+        Forehead: 108, 151, 337
+        Nose: 5, 51, 281
+        Left cheek: 50
+        Right cheek: 280
+    """
+    
+    landmark_sets = [
+        [108, 151, 337],  # Forehead
+        [5, 51, 281],  # Nose
+        [50],  # Left cheek
+        [280],  # Right cheek
+    ]
+    samples = []
+
+    # Convert frame to HSV
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    for landmark_set in landmark_sets:
+        for idx in landmark_set:
+            # Ensure the index is within the landmarks list
+            if idx < len(face_landmarks):
+                x = int(face_landmarks[idx][0] * frame.shape[1])
+                y = int(face_landmarks[idx][1] * frame.shape[0])
+
+                # Ensure x and y are within frame boundaries
+                x = min(max(x, 0), frame.shape[1] - 1)
+                y = min(max(y, 0), frame.shape[0] - 1)
+
+                # Sample a small circular region around the landmark
+                for img_i in range(-2, 3):
+                    for j in range(-2, 3):
+                        if np.sqrt(img_i**2 + j**2) <= 2:  # Small circle radius
+                            sample_x = min(max(x + img_i, 0), frame.shape[1] - 1) 
+                            sample_y = min(max(y + j, 0), frame.shape[0] - 1)
+                            samples.append(hsv_frame[sample_y, sample_x])
+
+    if not samples:
+        return None  # Return None if no samples found
+    
+    samples = np.array(samples)
+    
+    # Compute mean and standard deviation for each channel
+    mean = np.mean(samples, axis=0)
+    std = np.std(samples, axis=0)
+
+    # Define the range as mean ± 2 standard deviations for each channel
+    lower_bound = mean - 2 * std
+    upper_bound = mean + 2 * std
+
+    # Filter samples (get rid of outliers)
+    mask = np.all((samples >= lower_bound) & (samples <= upper_bound), axis=1)
+    filtered_samples = samples[mask]
+
+    if len(filtered_samples) == 0:
+        return None  # Return None if all samples were filtered out
+
+    # Compute the final average color
+    average_color_hsv = np.mean(filtered_samples, axis=0)
+
+    # Save debug image to local directory (BGR)
+    bgr_col = cv2.cvtColor(np.uint8([[average_color_hsv]]), cv2.COLOR_HSV2BGR)[0][0]
+    save_col_to_img("skin_tone_sample", bgr_col)
+
+    return average_color_hsv
+
+
+def save_col_to_img(image_name, final_color_bgr, overwrite=False):
+    img_i = 1
+    while os.path.exists(f"{image_name}_{img_i}.png"): img_i += 1
+    file_name = f"{image_name}_{img_i}.png"
+    debug_image = np.full((128, 128, 3), final_color_bgr, dtype=np.uint8)
+    os.makedirs(os.path.dirname(file_name), exist_ok=True)
+    cv2.imwrite(file_name, debug_image)
+
+# =====================================================
 # ================= OPTICAL FLOW ======================
 # =====================================================
 
@@ -449,14 +540,42 @@ def of_motion_compute(left_hull, right_hull, frame_grey, smoothing_factor, secon
 # ===================== IMAGE  ========================
 # =====================================================
 
+HsvColorRef = None
+
+def init_hsv_color_ref(frame):
+    col_ref_hsv = None
+
+    # Skip if the color reference is already set
+    if col_ref_hsv is not None and not np.all(col_ref_hsv == 0):
+        return
+    
+    lms = get_faces_lms(frame)[0] # One face only
+
+    # Check if any face landmarks were detected
+    if not lms or len(lms) == 0:
+        return None, None
+    
+    # Get the face landmarks
+    if col_ref_hsv is None or np.all(col_ref_hsv == 0):
+        try:
+            col_ref_hsv = init_sample_skin_tone(frame, lms)
+            print("HSV Color Reference:", col_ref_hsv)
+        except:
+            print("Error sampling skin tone (no landmarks... yet)")
+        if col_ref_hsv is None:
+            col_ref_hsv = np.array([0, 0, 0], dtype=np.uint8)
+
+    return col_ref_hsv
+
+
 def hsv_range(config):
     # HSV color gates (skin tone range)
     lower_color = np.array([
-        _average_color_hsv[0] - config['hue_range'] + config['hue_offset'], 
+        HsvColorRef[0] - config['hue_range'] + config['hue_offset'], 
         config['sat_low'], 
         config['val_low']], dtype=np.uint8)
     upper_color = np.array([
-        _average_color_hsv[0] + config['hue_range'] + config['hue_offset'], 
+        HsvColorRef[0] + config['hue_range'] + config['hue_offset'], 
         config['sat_high'], 
         config['val_high']], dtype=np.uint8)
     
@@ -504,11 +623,13 @@ def process(frame):
     config = get_config()
 
     # ~~~ DOWNSCALE (PERFORMANCE) ~~~
+    # --------------------------------
     frame = downscale_image(frame, 1)
     of_frame = frame # default to the original frame
     CombinedGridFrame = DISPLAY_FRAME("Original", frame, CombinedGridFrame, TOTAL_FRAMES) 
     
     # ~~~ MEDIAPIPE FACE MESH ~~~
+    # ----------------------------
     # Get bounds of the eyes as convex hulls (borders the eyes)
     left_hull, right_hull = get_eye_bounds(frame, config)
 
@@ -518,11 +639,15 @@ def process(frame):
         of_frame = frame
         print("OF Stage 1 : Original Frame")
 
+    
     # ~~~ RUN PROCESSING STEPS ~~~
-    # == Step 1 == Gaussian blur to soften the image
+    # ----------------------------
+    # == Step 1 == 
+    # Gaussian blur to soften the image
     hsv_mask_blur = cv2.GaussianBlur(frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
 
-    # == Step 2 == Convert the image to HSV color space
+    # == Step 2 == 
+    # Convert the image to HSV color space
     hsv_frame = cv2.cvtColor(hsv_mask_blur, cv2.COLOR_BGR2HSV)
 
     if config['of_process_stage'] == 2:
@@ -531,13 +656,15 @@ def process(frame):
         of_frame = hsv_frame
         print("OF Stage 2")
 
-    # == Step 3 == Create a mask based on the HSV range, and median blur it to remove noise
+    # == Step 3 == 
+    # Create a mask based on the HSV range, and median blur it to remove noise
     lo_hsv_gate, hi_hsv_gate = hsv_range(config)
     hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
     hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
     CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
 
-    # == Step 4 == Dilate the mask to make objects more connected (thick)
+    # == Step 4 == 
+    # Dilate the mask to make objects more connected (thick)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_kernel'], config['dilation_kernel']))
     hsv_mask_dil = cv2.dilate(hsv_mask_blur, kernel)
     CombinedGridFrame = DISPLAY_FRAME("HSV Mask (dilated)", hsv_mask_dil, CombinedGridFrame, TOTAL_FRAMES)
@@ -548,7 +675,8 @@ def process(frame):
         of_frame = hsv_mask_dil
         print("OF Stage 3")
 
-    # == Step 5 == Bitwise AND the original frame with the mask to get the final output
+    # == Step 5 == 
+    # Bitwise AND the original frame with the mask to get the final output
     hsv_masked_out = cv2.bitwise_and(frame, frame, mask=hsv_mask_dil)
     hsv_masked_out = cv2.GaussianBlur(hsv_masked_out, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
     CombinedGridFrame = DISPLAY_FRAME("HSV-Masked Result", hsv_masked_out, CombinedGridFrame, TOTAL_FRAMES)
@@ -559,7 +687,10 @@ def process(frame):
         of_frame = hsv_masked_out
         print("OF Stage 4")
     
-    # == Step 6 == Compute Motion!
+
+    # ~~~ MOTION CALCULATIONS ~~~
+    # ---------------------------
+    # Grey version of the frame for Optical Flow
     of_frame = cv2.cvtColor(of_frame, cv2.COLOR_BGR2GRAY) if len(of_frame.shape) == 3 else of_frame # grey
     # 6A: Eye-area (dilated result)
     hsv_masked_out_gray = cv2.cvtColor(hsv_masked_out, cv2.COLOR_BGR2GRAY)
@@ -577,10 +708,13 @@ def process(frame):
 
 
 def update(in_frame):
-    global WindowIndex
+    global WindowIndex, HsvColorRef
 
     # Multi-image display
     combined_frame = None
+
+    # Get the HSV color reference
+    HsvColorRef = init_hsv_color_ref(in_frame)
 
     # Isolate the color
     processed_frame = process(in_frame)
@@ -653,15 +787,15 @@ Detector = facelms()
 print("FaceMeshDetector is created!")
 
 
-def get_all_lms(frame):
+def get_faces_lms(frame):
     '''Gets all the landmarks from the frame.'''
-    img_lm, face_lm, landmarks = Detector.FindFaceMesh(frame, False)
-    return landmarks
+    img_lm, faces_lm, faces_lms = Detector.FindFaceMesh(frame, False)
+    return faces_lms
 
 
 def get_eye_lms_data(frame):
     '''Gets the landmarks that surround the eyes, and returns tuple (left_eye, right_eye).'''
-    lms = get_all_lms(frame)
+    lms = get_faces_lms(frame)
     
     # Check if any face landmarks were detected
     if not lms or len(lms) == 0:
@@ -692,29 +826,6 @@ def get_eye_lms_data(frame):
         return None, None
 
     return left_eye, right_eye
-
-
-def get_eye_lms_dict(left_eye, right_eye):
-    '''Process the eye landmarks to extract the eye socket, pupil, etc as a dictionary.'''
-    if left_eye is None or right_eye is None:
-        return None
-
-    # Extract specific landmarks for each eye
-    left_eye_data = {
-        "upper_socket": left_eye[0:2],
-        "lower_socket": left_eye[2:4],
-        "inner_corner": left_eye[4],
-        "outer_corner": left_eye[5],
-    }
-
-    right_eye_data = {
-        "upper_socket": right_eye[0:2],
-        "lower_socket": right_eye[2:4],
-        "inner_corner": right_eye[4],
-        "outer_corner": right_eye[5],
-    }
-
-    return left_eye_data, right_eye_data
 
 
 def expand_eye_bound_lms(eye_points, factor):
