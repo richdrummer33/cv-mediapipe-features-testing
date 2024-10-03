@@ -42,25 +42,16 @@ upper_bound = np.array([10, 255, 255])
 # Fields
 _fps = 30
 
-# OLD (ref color for HSV isolation)
-# _bgr_color_ref_path = "reference.png"
-# 
-# def get_bgr_from_reference_image(image_path):
-#     image = cv2.imread(image_path)
-#     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-#     return np.mean(image_rgb, axis=(0, 1))
-# 
-# # Get the average BGR color from the reference image
-# bgr_color_ref = get_bgr_from_reference_image(_bgr_color_ref_path)
-#
+# Default skin tone reference color
+def get_bgr_from_reference_image(image_path):
+    image = cv2.imread(image_path)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return np.mean(image_rgb, axis=(0, 1))
+# Get the average BGR color from the reference image
+bgr_color_ref = get_bgr_from_reference_image("reference.png")
 # Convert the average BGR color to HSV
-# average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_ref[2]]]])
-# _average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
-#
-# print the r,g,b vals
-# print(f"Average BGR color: {bgr_color_ref}")
-# print the h,s,v vals
-# print(f"Average HSV color: {_average_color_hsv}")
+average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_ref[2]]]])
+_average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
 
 CombinedGridFrame = None
 TOTAL_FRAMES = 5
@@ -548,7 +539,7 @@ def init_hsv_color_ref(hsv_frame, bgr_frame):
     # Get and check lm results
     faces_lms = get_faces_lms(bgr_frame) # One face only
     if not faces_lms or len(faces_lms) == 0:
-        HsvColorRef = np.array([0, 0, 0], dtype=np.uint8)
+        HsvColorRef = _average_color_hsv
         return None, None
     
     try:
@@ -558,7 +549,7 @@ def init_hsv_color_ref(hsv_frame, bgr_frame):
     
     # Setto black to prevent errors untitl the face is seen
     if HsvColorRef is None:
-        HsvColorRef = np.array([0, 0, 0], dtype=np.uint8)
+        HsvColorRef = _average_color_hsv
 
 
 def hsv_range(config):
