@@ -153,11 +153,7 @@ class ConfigWindow(QMainWindow):
         layout.addWidget(self.image_label)
 
         # 4. Set default values
-        default_config = get_config_vals()
-        for name, slider in self.sliders.items():
-            if name in default_config:
-                slider.setValue(default_config[name])
-        print("Config window Default values set!")
+        self.apply_defaults()
 
         # 5. Add Save and Load buttons
         self.image_label = QLabel()
@@ -177,6 +173,23 @@ class ConfigWindow(QMainWindow):
     def ensure_odd(value):
         return value if value % 2 == 1 else value + 1
  
+    def apply_defaults(self):
+        # find the current directory wth "defaut_" prefix, and load the json file
+        file_path = [f for f in os.listdir() if f.startswith("default_") and f.endswith(".json")]
+        # load the json
+        if len(file_path) > 0:
+            with open(file_path[0], 'r') as f:
+                config = json.load(f)
+            self.apply_config(config)
+            print("Config window Default values set from file!")
+        else:
+            default_config = get_config_vals()
+            for name, slider in self.sliders.items():
+                if name in default_config:
+                    slider.setValue(default_config[name])
+            print("Config window Default values set hardcoded.")
+        
+    
     def update_value_label(self, name, value):
         if name in ['OF Smoothing Factor', 'Eye-Area Smoothing Factor']:
             display_value = value / 10.0
@@ -638,7 +651,6 @@ def init_hsv_color_ref(hsv_frame, bgr_frame):
     
     try:
         HsvColorRef = sample_skin_tone(hsv_frame, faces_lms[0])
-        print("Skin tone sampled successfully!")
     except:
         print("Error sampling skin tone (no landmarks... yet)")
     
@@ -651,10 +663,10 @@ def HUE_OFFSET():
     return cfg['hue_offset'] - 180
 
 
-def hsv_range(config):
+def hsv_range(config, hsv_color_ref):
     # HSV color gates (skin tone range)
-    h_lower = max(0, HsvColorRef[0] - config['hue_range'] + HUE_OFFSET())
-    h_upper = min(180, HsvColorRef[0] + config['hue_range'] + HUE_OFFSET())
+    h_lower = max(0, hsv_color_ref[0] - config['hue_range'] + HUE_OFFSET())
+    h_upper = min(180, hsv_color_ref[0] + config['hue_range'] + HUE_OFFSET())
     lower_color = np.array([
         h_lower,
         config['sat_low'], 
@@ -693,6 +705,25 @@ def CROP(frame, left_hull, right_hull):
         masked_frame = frame
     # Done!
     return masked_frame
+
+
+def hist_back_projection(hsv_frame, hsv_low = 0, hsv_high = 180):
+    
+    # Extract the hue channel from HSV frame and apply histogram back-projection
+    hue = hsv_frame[:, :, 0]
+    hist_size = max(25, 2)  # TODO: Use CONFIG 
+    hue_range = hsv_low, hsv_high
+    #print("Hue range:", hue_range)
+
+    # Calculate the histogram and normalize it
+    hist = cv2.calcHist([hue], [0], None, [hist_size], hue_range)
+    hist = cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
+
+    # Calculate back-projection
+    backproj = cv2.calcBackProject([hue], [0], hist, hue_range, 1)
+
+    return backproj
+
 
 
 prev_area = 0
@@ -742,35 +773,17 @@ def process(bgr_frame):
         # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
         print("OF Stage 2")
 
-
     # == Step 3 == 
     # Get HSV range
-    lo_hsv_gate, hi_hsv_gate = hsv_range(config)
+    lo_hsv_gate, hi_hsv_gate = hsv_range(config, HsvColorRef)
     try: 
         hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
     except:
         print("Error creating HSV mask (no landmarks... yet)")
         return bgr_frame
-    # 3.1 
-    print("Apply histogram back-projection...")
-    # Extract the hue channel from HSV frame and apply histogram back-projection
-    hue = hsv_frame[:, :, 0]
-    hist_size = max(25, 2)  # TODO: Use CONFIG 
-    hue_range = 0, 180
-    print("Hue range:", hue_range)
 
-    # Calculate the histogram and normalize it
-    hist = cv2.calcHist([hue], [0], None, [hist_size], hue_range)
-    hist = cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
-
-    # Calculate back-projection
-    backproj = cv2.calcBackProject([hue], [0], hist, hue_range, 1)
-
-    # Display the back-projection result
-    CombinedGridFrame = DISPLAY_FRAME("BackProj", backproj, CombinedGridFrame, TOTAL_FRAMES)
-    print("Back-projection applied!")
-
-    # 3.2 Create a mask based on the HSV range, and median blur it to remove noise
+    # 3.2 
+    # Create a mask based on the HSV range, and median blur it to remove noise
     hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
     CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
 
@@ -794,10 +807,13 @@ def process(bgr_frame):
     
     if config['of_process_stage'] == 4:
         # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
-        of_frame = CROP(hsv_masked_out, left_hull, right_hull)
-        # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
+        hsv_masked_out = cv2.bitwise_not(hsv_masked_out)    # invert color hsv_masked_out
+        of_frame = hist_back_projection(hsv_masked_out, 0, 180)
+        CombinedGridFrame = DISPLAY_FRAME("Back Projection", of_frame, CombinedGridFrame, TOTAL_FRAMES)
+        of_frame = CROP(of_frame, left_hull, right_hull)
         print("OF Stage 4")
     
+
 
     # ~~~ MOTION CALCULATIONS ~~~
     # ---------------------------
