@@ -1,0 +1,20 @@
+Please implemen the Process() method as a c# script for unity with OpenCVForUnity (1st atttached). 
+(note:  Please.)
+
+BACKGROUND
+
+This script performs preprocessing steps for the Optical Flow algorithm, including color isolation, 
+face mesh detection, and optical flow computation. It also provides a GUI for configuring various 
+parameters using PyQt5.
+
+This is for developing an image-processing flow, to be used for open/closed/blink detection in a Unity-engine game.
+The image processing flow that results from developments here will be implemented in Unity using OpenCVForUnity.
+
+APPROACH / DESIGN
+
+The `process` function is responsible for processing a given frame to isolate a specific color and remove non-colors.  It performs several preprocessing steps, including downscaling, Gaussian blurring, HSV conversion, median blurring,  dilation, and bitwise operations to achieve the desired output. 
+
+Additionally, it integrates with the Mediapipe Face  Mesh to obtain eye bounds and applies Optical Flow (OF) computation at different stages of the processing pipeline. - frame (numpy.ndarray): The input frame to be processed.
+
+PY SCRIPT: Attached
+

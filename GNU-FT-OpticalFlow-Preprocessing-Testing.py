@@ -1,3 +1,61 @@
+'''
+This script performs preprocessing steps for the Optical Flow algorithm, including color isolation, 
+face mesh detection, and optical flow computation. It also provides a GUI for configuring various 
+parameters using PyQt5.
+
+This is for developing an image-processing flow, to be used for open/closed/blink detection in a Unity-engine game.
+The image processing flow that results from developments here will be implemented in Unity using OpenCVForUnity.
+
+Classes:
+- ConfigWindow: A PyQt5 QMainWindow subclass for configuring various parameters using sliders.
+- PlotWindow: A PyQt5 QWidget subclass for displaying real-time plots of eyelid motion magnitude.
+
+Functions:
+- get_bgr_from_reference_image(image_path): Reads an image and returns the average BGR color.
+- get_config(): Retrieves the current configuration values from the ConfigWindow.
+- DISPLAY_FRAME(window_name, img_frame, combined_frame, num_images): Displays multiple frames in a single window.
+- plotter(): Initializes and displays the PlotWindow.
+- downscale_image(image, levels): Downscales an image by a specified number of levels.
+- EMA(prev_val, curr_val, smoothing_factor): Computes the Exponential Moving Average (EMA) for smoothing.
+- of_motion_compute(left_hull, right_hull, frame_grey, smoothing_factor, secondary_plot_value): Computes the average vertical motion of the eyelids within the eye regions.
+- hsv_range(config): Returns the lower and upper HSV bounds for color isolation based on the configuration.
+- eye_bounds_mask(frame, left_hull, right_hull): Creates a mask from the shape hulls and keeps the eye areas.
+- CROP(frame, left_hull, right_hull): Crops the eye areas from the frame using convex hulls.
+- process(frame): Processes a frame to isolate a color and remove non-colors.
+- update(in_frame): Updates the frame by processing it and displaying the results.
+- get_all_lms(frame): Gets all the landmarks from the frame using the FaceMeshDetector.
+- get_eye_lms_data(frame): Gets the landmarks that surround the eyes and returns them as a tuple (left_eye, right_eye).
+- get_eye_lms_dict(left_eye, right_eye): Processes the eye landmarks to extract the eye socket, pupil, etc., as a dictionary.
+- expand_eye_bound_lms(eye_points, factor): Expands the eye boundary landmarks by a specified factor.
+- get_eye_bounds(frame, config): Main function to process the frame and extract eye landmark data.
+
+Global Variables:
+- _bg_subtractor: Background subtractor for foreground extraction.
+- clahe: CLAHE object for contrast limited adaptive histogram equalization.
+- lower_bound: Lower HSV bound for color isolation.
+- upper_bound: Upper HSV bound for color isolation.
+- _fps: Frames per second for video processing.
+- _bgr_color_ref_path: File path to the reference image for BGR color extraction.
+- bgr_color_ref: Average BGR color from the reference image.
+- _average_color_hsv: Average HSV color converted from the BGR reference color.
+- CombinedGridFrame: Combined frame for displaying multiple images.
+- TOTAL_FRAMES: Total number of frames to be displayed.
+- COLUMNS_FRAMES: Number of columns in the grid for displaying frames.
+- config_window: Global variable for the configuration window.
+- config_app: Global variable for the configuration application.
+- WindowIndex: Index for tracking the current window in the grid display.
+- plot_queue: Queue for storing data to be plotted.
+- prev_grey: Previous grayscale frame for optical flow computation.
+- prev_left_centroid: Previous centroid of the left eye for optical flow computation.
+- prev_right_centroid: Previous centroid of the right eye for optical flow computation.
+- motion_history_left: History of motion magnitudes for the left eye.
+- motion_history_right: History of motion magnitudes for the right eye.
+- smoothed_left_motion: Smoothed vertical motion for the left eye.
+- smoothed_right_motion: Smoothed vertical motion for the right eye.
+- prev_area: Previous area of the eye region for motion computation.
+- Detector: FaceMeshDetector object for detecting face landmarks.
+'''
+
 # Typical
 import cv2
 import math
@@ -490,88 +548,7 @@ def CROP(frame, left_hull, right_hull):
     # Done!
     return masked_frame
 
-
-prev_area = 0
-def process(frame):
-    '''Converts to HSV to isolate a color in the frame, and removes non-colors'''
-    global WindowIndex, CombinedGridFrame, prev_area
-    WindowIndex = 0  # Reset window index
-    area = 0
-
-    # ~~~ SET THINGS UP ~~~
-    CombinedGridFrame = None   # grid display (stacks images each time DISPLAY_FRAME is called)
-    of_frame = None     # The frame OF is computed from
-    config = get_config()
-
-    # ~~~ DOWNSCALE (PERFORMANCE) ~~~
-    frame = downscale_image(frame, 1)
-    of_frame = frame # default to the original frame
-    CombinedGridFrame = DISPLAY_FRAME("Original", frame, CombinedGridFrame, TOTAL_FRAMES) 
-    
-    # ~~~ MEDIAPIPE FACE MESH ~~~
-    # Get bounds of the eyes as convex hulls (borders the eyes)
-    left_hull, right_hull = get_eye_bounds(frame, config)
-
-    if config['of_process_stage'] == 1:
-        # Apply the eye mask to the original frame, and use it for Optical Flow
-        frame = CROP(frame, left_hull, right_hull)
-        of_frame = frame
-        print("OF Stage 1 : Original Frame")
-
-    # ~~~ RUN PROCESSING STEPS ~~~
-    # == Step 1 == Gaussian blur to soften the image
-    hsv_mask_blur = cv2.GaussianBlur(frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
-
-    # == Step 2 == Convert the image to HSV color space
-    hsv_frame = cv2.cvtColor(hsv_mask_blur, cv2.COLOR_BGR2HSV)
-
-    if config['of_process_stage'] == 2:
-        # Apply the eye mask to the HSV image, and use it for Optical Flow
-        hsv_frame = CROP(hsv_frame, left_hull, right_hull)
-        of_frame = hsv_frame
-        print("OF Stage 2")
-
-    # == Step 3 == Create a mask based on the HSV range, and median blur it to remove noise
-    lo_hsv_gate, hi_hsv_gate = hsv_range(config)
-    hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
-    hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
-    CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
-
-    # == Step 4 == Dilate the mask to make objects more connected (thick)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_kernel'], config['dilation_kernel']))
-    hsv_mask_dil = cv2.dilate(hsv_mask_blur, kernel)
-    CombinedGridFrame = DISPLAY_FRAME("HSV Mask (dilated)", hsv_mask_dil, CombinedGridFrame, TOTAL_FRAMES)
-
-    if config['of_process_stage'] == 3:
-        # Apply the eye mask to the dilated HSV mask, and use it for Optical Flow
-        hsv_mask_dil = CROP(hsv_mask_dil, left_hull, right_hull)
-        of_frame = hsv_mask_dil
-        print("OF Stage 3")
-
-    # == Step 5 == Bitwise AND the original frame with the mask to get the final output
-    hsv_masked_out = cv2.bitwise_and(frame, frame, mask=hsv_mask_dil)
-    hsv_masked_out = cv2.GaussianBlur(hsv_masked_out, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
-    CombinedGridFrame = DISPLAY_FRAME("HSV-Masked Result", hsv_masked_out, CombinedGridFrame, TOTAL_FRAMES)
-    
-    if config['of_process_stage'] == 4:
-        # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
-        hsv_masked_out = CROP(hsv_masked_out, left_hull, right_hull)
-        of_frame = hsv_masked_out
-        print("OF Stage 4")
-    
-    # == Step 6 == Compute Motion!
-    of_frame = cv2.cvtColor(of_frame, cv2.COLOR_BGR2GRAY) if len(of_frame.shape) == 3 else of_frame # grey
-    # 6A: Eye-area (dilated result)
-    hsv_masked_out_gray = cv2.cvtColor(hsv_masked_out, cv2.COLOR_BGR2GRAY)
-    area = cv2.countNonZero(hsv_masked_out_gray) # single-channel
-    area = EMA(prev_area, area, config['eye_area_smoothing'] / 10)
-    prev_area = area
-    # 6B: Compute the optical flow 
-    of_motion_compute(left_hull, right_hull, of_frame, config['of_smoothing'] / 10, area)
-
-    # ... Finally, DISPLAY all the steps combined
-    cv2.namedWindow("Processing Steps", cv2.WINDOW_NORMAL)
-    cv2.imshow("Processing Steps", CombinedGridFrame)
+ 
 
     return hsv_masked_out
 
@@ -772,7 +749,7 @@ def draw_eye_border(frame, landmarks, color=(0, 255, 0), thickness=2):
     if len(landmarks) < 3:
         print("Not enough landmarks to draw a border")
         return None
-
+    
     # Scale landmarks to frame dimensions
     scaled_landmarks = []
     for lm in landmarks:
