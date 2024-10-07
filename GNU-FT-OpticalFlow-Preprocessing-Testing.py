@@ -10,9 +10,10 @@ import sys
 from FaceMeshModule import FaceMeshDetector as facelms
 
 # QtWindow UI
-from PyQt5.QtWidgets import QApplication, QMainWindow, QScrollArea, QWidget, QGridLayout, QLabel, QSlider, QVBoxLayout
+from PyQt5.QtWidgets import QApplication, QMainWindow, QScrollArea, QWidget, QGridLayout, QLabel, QSlider, QVBoxLayout, QFileDialog, QPushButton
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
+import json
 
 # OF
 import matplotlib.pyplot as plt
@@ -54,8 +55,9 @@ average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_re
 _average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
 
 CombinedGridFrame = None
-TOTAL_FRAMES = 5
-COLUMNS_FRAMES = 3
+TOTAL_FRAMES = 7
+COLUMNS_FRAMES = 4
+
 
 
 # =====================================================
@@ -65,10 +67,42 @@ COLUMNS_FRAMES = 3
 # Declare global variable
 config_window = None
 config_app = None
+# Global configuration dictionary
+config_lock = threading.Lock()
+current_config = {
+    'hue_range': 25,
+    'hue_offset': 180,
+    'sat_low': 25,
+    'sat_high': 255,
+    'val_low': 85,
+    'val_high': 255,
+    'of_smoothing': 50,
+    'eye_area_smoothing': 50,
+    'eye_bounds_expand': 10,
+    'of_process_stage': 1,
+    # 'area_process_stage': 3,
+    'median_blur_knl': 3,
+    'gauss_blur_knl_pre': 3,
+    'dilation_knl_mask': 3,
+    'gauss_blur_knl_dil': 3,
+}
+
+def get_config_vals():
+    global config_window
+    if config_window is not None:
+        return config_window.get_window_config()
+    print("Config window is not initialized. Returning None!")
+    return None
+            
 
 class ConfigWindow(QMainWindow):
     def __init__(self):
+        global config_window
+        
+        # 1. Initialize the main window
         super().__init__()
+        config_window = self # SINGLETON
+
         self.setWindowTitle("FT/OF Preproc Testing")
         self.setGeometry(100, 100, 800, 600)
 
@@ -85,7 +119,7 @@ class ConfigWindow(QMainWindow):
         slider_layout = QGridLayout(slider_widget)
         layout.addWidget(slider_widget)
 
-        # Define sliders with (Name, Default Value, Maximum Value)
+        # 2. Define sliders with (Name, Minimum Value, Maximum Value)
         sliders = [
             # HSV color isolation
             ('Hue Range', 0, 90),
@@ -96,15 +130,16 @@ class ConfigWindow(QMainWindow):
             ('Value Low', 0, 255),
             ('Value High', 0, 255),
             # OF
-            ('OF Smoothing Factor', 10, 100),
-            ('Eye-Area Smoothing Factor', 10, 100),
+            ('OF Smoothing Factor', 10, 100),       # divided by 10
+            ('Eye-Area Smoothing Factor', 10, 100), # divided by 10
             ('Eye Bounds Expand', 10, 50),
+            # ('Area Process Stage', 1, 4),
             ('OF Process Stage', 1, 4),
             # Kernels
-            ('Median Blur K (HSV mask)', 3, 25),
-            ('Gauss Blur K (OG image)', 3, 25),
-            ('Dilation Kernel', 8, 20),
-            ('Gauss Blur K (dilated eyes)', 3, 25),
+            ('Median Blur K (HSV mask)', 0, 25),
+            ('Gauss Blur K (OG image)', 0, 25),
+            ('Dilation K (HSV-Masked)', 0, 25),
+            ('Gauss Blur K (dilated eyes)', 0, 25),
             #('CLAHE Clip Limit', 20, 100),
             #('CLAHE Grid Size', 8, 16),
             #('BG Sub Learning Rate', 5, 100),
@@ -112,27 +147,78 @@ class ConfigWindow(QMainWindow):
             #('BG Sub Var Threshold', 16, 100),
         ]
 
-        self.sliders = {}  # Dictionary to store sliders
+        self.sliders = {}       # Dictionary to store sliders
+        self.value_labels = {}  # Dictionary to store value labels
 
+        # 3. Add sliders to the layout
         for i, (name, default, maximum) in enumerate(sliders):
+            # Create slider
             label = QLabel(name)
             slider = QSlider(Qt.Horizontal)
+            
+            # Set slider range
             slider.setRange(0, maximum)
-            slider.setValue(default)
-            self.sliders[name] = slider  # Store slider in dictionary
 
+            # Get global default value
+            config_key = self.slider_name_to_config_key(name)
+            value = current_config.get(config_key, default)
+            print(f"The default value for {config_key} is {value}")
+
+            # Set slider value and store it
+            if value is not None:
+                # Set global def value
+                slider.setValue(int(value))
+                
+                # Store slider 
+                self.sliders[name] = slider
+                
+                # Create value label
+                value_label = QLabel(str(value))
+                self.value_labels[name] = value_label
+                
+                # Callback handlers
+                slider.valueChanged.connect(lambda value, name=name: self.update_value_label(name, value))
+                slider.valueChanged.connect(self.update_config)
+
+            # Layout
             row = i % 8
-            col = i // 8 * 2
+            col = i // 8 * 3
             slider_layout.addWidget(label, row, col)
             slider_layout.addWidget(slider, row, col + 1)
+            slider_layout.addWidget(value_label, row, col + 2)
 
+        # 5. Add Save and Load buttons
         self.image_label = QLabel()
         layout.addWidget(self.image_label)
 
+        button_layout = QVBoxLayout()
+        save_button = QPushButton("Save Configuration")
+        load_button = QPushButton("Load Configuration")
+        save_button.clicked.connect(self.save_config)
+        load_button.clicked.connect(self.load_config)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(load_button)
+        layout.addLayout(button_layout)
+
+    # === CLASS FUNCTIONS ===
+    def update_value_label(self, name, value):
+        if name in ['OF Smoothing Factor', 'Eye-Area Smoothing Factor']:
+            display_value = value / 10.0
+            self.value_labels[name].setText(f"{display_value:.1f}")
+        else:
+            self.value_labels[name].setText(str(value))
+    
+    def update_config(self):
+        global current_config
+        with config_lock:
+            current_config = self.get_window_config()
+
     @staticmethod
     def ensure_odd(value):
+        if value == 0:
+            return 0  # Return 0 if the input is 0
         return value if value % 2 == 1 else value + 1
-
+    
     def get_window_config(self):
         """Retrieve current values from all sliders."""
         config = {
@@ -149,10 +235,11 @@ class ConfigWindow(QMainWindow):
             'eye_area_smoothing': max(10, self.sliders['Eye-Area Smoothing Factor'].value()),
             'eye_bounds_expand': self.sliders['Eye Bounds Expand'].value(),
             'of_process_stage': self.sliders['OF Process Stage'].value(),
+            # 'area_process_stage': self.sliders['Area Process Stage'].value(),
             # Kernels
             'median_blur_knl': self.ensure_odd(self.sliders['Median Blur K (HSV mask)'].value()),
             'gauss_blur_knl_pre': self.ensure_odd(self.sliders['Gauss Blur K (OG image)'].value()),
-            'dilation_kernel': max(1, self.sliders['Dilation Kernel'].value()),
+            'dilation_knl_mask': max(1, self.sliders['Dilation K (HSV-Masked)'].value()),
             'gauss_blur_knl_dil': self.ensure_odd(self.sliders['Gauss Blur K (dilated eyes)'].value()),
             #'clahe_clip_limit': self.sliders['CLAHE Clip Limit'].value() / 10.0,
             #'clahe_grid_size': self.sliders['CLAHE Grid Size'].value(),
@@ -161,38 +248,51 @@ class ConfigWindow(QMainWindow):
             #'bg_sub_var_threshold': self.sliders['BG Sub Var Threshold'].value(),
         }
         return config
-
-def get_config():
-    global config_window
-    if config_window is not None:
-        return config_window.get_window_config()
-    else:
-        # Return default config or handle the error as needed
-        return {
-            # HSV color isolation
-            'hue_range': 20,
-            'hue_offset': 0,
-            # HSV thresholds
-            'sat_low': 25,
-            'sat_high': 255,
-            'val_low': 85,
-            'val_high': 255,
-            # OF
-            'of_smoothing': 25,
-            'eye_area_smoothing': 25,
-            'eye_bounds_expand': 10,
-            'of_process_stage': 1,
-            # Kernels
-            'median_blur_knl': 5,
-            'gauss_blur_knl_pre': 5,
-            'dilation_kernel': 8,
-            'gauss_blur_knl_dil': 5,
-            #'clahe_clip_limit': 2.0,
-            #'clahe_grid_size': 8,
-            #'bg_sub_learning_rate': 0.005,
-            #'bg_sub_history': 500,
-            #'bg_sub_var_threshold': 16,
+    
+    def slider_name_to_config_key(self, slider_name):
+        # Map slider names to configuration keys
+        name_map = {
+            'Hue Range': 'hue_range',
+            'Hue Offset': 'hue_offset',
+            'Saturation Low': 'sat_low',
+            'Saturation High': 'sat_high',
+            'Value Low': 'val_low',
+            'Value High': 'val_high',
+            'OF Smoothing Factor': 'of_smoothing',
+            'Eye-Area Smoothing Factor': 'eye_area_smoothing',
+            'Eye Bounds Expand': 'eye_bounds_expand',
+            'OF Process Stage': 'of_process_stage',
+            # 'Area Process Stage': 'area_process_stage',
+            'Median Blur K (HSV mask)': 'median_blur_knl',
+            'Gauss Blur K (OG image)': 'gauss_blur_knl_pre',
+            'Dilation K (HSV-Masked)': 'dilation_knl_mask',
+            'Gauss Blur K (dilated eyes)': 'gauss_blur_knl_dil',
         }
+        return name_map.get(slider_name, slider_name)
+
+    # Save/Load 
+    def save_config(self):
+        config = self.get_window_config()
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Configuration", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'w') as f:
+                json.dump(config, f)
+
+    def load_config(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Load Configuration", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'r') as f:
+                config = json.load(f)
+            self.apply_config(config)
+    
+    def apply_config(self, config):
+        for key, value in config.items():
+            #use the map to get the slider name
+            slider_name = self.slider_name_to_config_key(key)
+            if slider_name and slider_name in self.sliders:
+                self.sliders[slider_name].setValue(value)
+                self.update_value_label(slider_name, value)
+                
     
 
 # =====================================================
@@ -544,6 +644,7 @@ def init_hsv_color_ref(hsv_frame, bgr_frame):
     
     try:
         HsvColorRef = sample_skin_tone(hsv_frame, faces_lms[0])
+        print("Skin tone sampled successfully!")
     except:
         print("Error sampling skin tone (no landmarks... yet)")
     
@@ -551,15 +652,21 @@ def init_hsv_color_ref(hsv_frame, bgr_frame):
     if HsvColorRef is None:
         HsvColorRef = _average_color_hsv
 
+def HUE_OFFSET():
+    cfg = get_config_vals()
+    return cfg['hue_offset'] - 180
+
 
 def hsv_range(config):
     # HSV color gates (skin tone range)
+    h_lower = max(0, HsvColorRef[0] - config['hue_range'] + HUE_OFFSET())
+    h_upper = min(180, HsvColorRef[0] + config['hue_range'] + HUE_OFFSET())
     lower_color = np.array([
-        HsvColorRef[0] - config['hue_range'] + config['hue_offset'], 
+        h_lower,
         config['sat_low'], 
         config['val_low']], dtype=np.uint8)
     upper_color = np.array([
-        HsvColorRef[0] + config['hue_range'] + config['hue_offset'], 
+        h_upper,
         config['sat_high'], 
         config['val_high']], dtype=np.uint8)
     
@@ -604,7 +711,7 @@ def process(bgr_frame):
     # ~~~ SET THINGS UP ~~~
     CombinedGridFrame = None   # grid display (stacks images each time DISPLAY_FRAME is called)
     of_frame = None     # The frame OF is computed from
-    config = get_config()
+    config = get_config_vals()
 
     # ~~~ DOWNSCALE (PERFORMANCE) ~~~
     # --------------------------------
@@ -620,6 +727,7 @@ def process(bgr_frame):
     if config['of_process_stage'] == 1:
         # Apply the eye mask to the original frame, and use it for Optical Flow
         of_frame = CROP(bgr_frame, left_hull, right_hull)
+        # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
         print("OF Stage 1 : Original Frame")
 
     # ~~~ RUN PROCESSING STEPS ~~~
@@ -637,28 +745,51 @@ def process(bgr_frame):
     if config['of_process_stage'] == 2:
         # Apply the eye mask to the HSV image, and use it for Optical Flow
         of_frame = CROP(hsv_frame, left_hull, right_hull)
+        # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
         print("OF Stage 2")
 
+
     # == Step 3 == 
-    # Create a mask based on the HSV range, and median blur it to remove noise
+    # Get HSV range
     lo_hsv_gate, hi_hsv_gate = hsv_range(config)
     try: 
         hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
     except:
         print("Error creating HSV mask (no landmarks... yet)")
         return bgr_frame
+    # 3.1 
+    print("Apply histogram back-projection...")
+    # Extract the hue channel from HSV frame and apply histogram back-projection
+    hue = hsv_frame[:, :, 0]
+    hist_size = max(25, 2)  # TODO: Use CONFIG 
+    hue_range = 0, 180
+    print("Hue range:", hue_range)
+
+    # Calculate the histogram and normalize it
+    hist = cv2.calcHist([hue], [0], None, [hist_size], hue_range)
+    hist = cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
+
+    # Calculate back-projection
+    backproj = cv2.calcBackProject([hue], [0], hist, hue_range, 1)
+
+    # Display the back-projection result
+    CombinedGridFrame = DISPLAY_FRAME("BackProj", backproj, CombinedGridFrame, TOTAL_FRAMES)
+    print("Back-projection applied!")
+
+    # 3.2 Create a mask based on the HSV range, and median blur it to remove noise
     hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
     CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
 
     # == Step 4 == 
     # Dilate the mask to make objects more connected (thick)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_kernel'], config['dilation_kernel']))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_knl_mask'], config['dilation_knl_mask']))
     hsv_mask_dil = cv2.dilate(hsv_mask_blur, kernel)
     CombinedGridFrame = DISPLAY_FRAME("HSV Mask (dilated)", hsv_mask_dil, CombinedGridFrame, TOTAL_FRAMES)
 
     if config['of_process_stage'] == 3:
         # Apply the eye mask to the dilated HSV mask, and use it for Optical Flow
         of_frame = CROP(hsv_mask_dil, left_hull, right_hull)
+        # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
         print("OF Stage 3")
 
     # == Step 5 == 
@@ -670,6 +801,7 @@ def process(bgr_frame):
     if config['of_process_stage'] == 4:
         # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
         of_frame = CROP(hsv_masked_out, left_hull, right_hull)
+        # of_frame = cv2.bitwise_not(of_frame) # NEW: Invert cols (usuing pos HSV range)
         print("OF Stage 4")
     
 
@@ -677,6 +809,7 @@ def process(bgr_frame):
     # ---------------------------
     # Grey version of the frame for Optical Flow
     of_frame = cv2.cvtColor(of_frame, cv2.COLOR_BGR2GRAY) if len(of_frame.shape) == 3 else of_frame # grey
+
     # 6A: Eye-area (dilated result)
     eye_area_frame = of_frame
     if len(of_frame.shape) == 3: eye_area_frame = cv2.cvtColor(of_frame, cv2.COLOR_BGR2GRAY)
@@ -936,10 +1069,10 @@ def main():
     config_app = QApplication(sys.argv)
     config_window = ConfigWindow()
     config_window.show()
-
-    # get confg and enforce config['of_process_stage'] == 5
-    config = get_config()
-    config['of_process_stage'] = 1
+    
+    # Set config defaults
+    config_def = get_config_vals()
+    config_window.apply_config(config_def)
     
     # Initialize and show the PlotWindow
     plot_window = PlotWindow()

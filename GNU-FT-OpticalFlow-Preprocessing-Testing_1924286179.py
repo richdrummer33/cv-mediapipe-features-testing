@@ -63,7 +63,7 @@ average_color_bgr = np.uint8([[[bgr_color_ref[0], bgr_color_ref[1], bgr_color_re
 HsvRef = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
 
 CombinedGridFrame = None
-TOTAL_FRAMES = 5
+TOTAL_FRAMES = 3
 COLUMNS_FRAMES = 3
 
 
@@ -778,16 +778,16 @@ def CROP(frame, hull):
     return masked_frame
 
 
-def process_face_side(bgr_frame, eye_hull, hsv_ref, config):
+def process_face_side(config, bgr_frame, eye_hull, hsv_ref, all_lms):
     # Preprocessing
     bgr_frame = apply_retinex(bgr_frame)
-    gray_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+    #gray_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
     gray_frame = clahe.apply(gray_frame)
     
     # Apply CLAHE to the eye region
-    eye_lms = get_eye_lms_data(bgr_frame)
-    if eye_lms:
-        gray_frame = apply_clahe_region(gray_frame, eye_lms)
+    #eye_lms = pick_eyes_lm_points(all_lms)
+    #if eye_lms:
+    #    gray_frame = apply_clahe_region(gray_frame, eye_lms)
 
     # Gaussian blur
     if config['gauss_blur_knl_pre'] > 0:
@@ -828,12 +828,13 @@ def process(bgr_frame):
     config = get_config_vals()
 
     # Get face landmarks and eye bounds
-    faces_lms = get_faces_lms(bgr_frame)
-    if faces_lms and len(faces_lms) > 0:
-        left_hull, right_hull = get_eye_bounds(bgr_frame, config, faces_lms=faces_lms[0])
-
-    if not left_hull or not right_hull or not faces_lms:
-        print("No eye bounds found. Skipping processing.")
+    all_lms = get_all_lms(bgr_frame)
+    if all_lms and len(all_lms) > 0:
+        all_lms = all_lms[0]  # Only consider the first face
+        print("Getting hulls from exising landmarks...")
+        left_hull, right_hull = get_eye_bounds(bgr_frame, config, all_lms)
+    else:
+        print("No face landmarks found. Skipping processing!")
         return bgr_frame
 
     # Downscale
@@ -841,11 +842,11 @@ def process(bgr_frame):
     CombinedGridFrame = DISPLAY_FRAME("Original", bgr_frame, CombinedGridFrame, TOTAL_FRAMES)
 
     # Get HSV references for each side
-    hsv_ref_left, hsv_ref_right = sample_skin_tone(bgr_frame, faces_lms[0])
+    hsv_ref_left, hsv_ref_right = sample_skin_tone(bgr_frame, all_lms)
 
     # Process each side
-    left_result, left_hsv, left_mask, left_masked = process_face_side(bgr_frame.copy(), left_hull, hsv_ref_left, config)
-    right_result, right_hsv, right_mask, right_masked = process_face_side(bgr_frame, right_hull, hsv_ref_right, config)
+    left_result, left_hsv, left_mask, left_masked = process_face_side(config, bgr_frame.copy(), left_hull, hsv_ref_left, all_lms)
+    right_result, right_hsv, right_mask, right_masked = process_face_side(config, bgr_frame, right_hull, hsv_ref_right, all_lms)
 
     # Combine results
     combined_hsv = np.hstack((left_hsv, right_hsv))
@@ -853,8 +854,8 @@ def process(bgr_frame):
     combined_masked = np.hstack((left_masked, right_masked))
     
     # Display steps
-    CombinedGridFrame = DISPLAY_FRAME("HSV", combined_hsv, CombinedGridFrame, TOTAL_FRAMES)
-    CombinedGridFrame = DISPLAY_FRAME("HSV Mask", combined_mask, CombinedGridFrame, TOTAL_FRAMES)
+    # CombinedGridFrame = DISPLAY_FRAME("HSV", combined_hsv, CombinedGridFrame, TOTAL_FRAMES)
+    # CombinedGridFrame = DISPLAY_FRAME("HSV Mask", combined_mask, CombinedGridFrame, TOTAL_FRAMES)
     CombinedGridFrame = DISPLAY_FRAME("HSV-Masked Result", combined_masked, CombinedGridFrame, TOTAL_FRAMES)
 
     # Combine cropped results
@@ -926,33 +927,28 @@ Detector = facelms()
 print("FaceMeshDetector is created!")
 
 
-def get_faces_lms(frame):
+def get_all_lms(frame):
     '''Gets all the landmarks from the frame.'''
     img, faces, lms = Detector.FindFaceMesh(img=frame, draw=False)
     return lms
 
 
-def get_eye_lms_data(frame, faces_lms = None):
+def pick_eyes_lm_points(all_lms):
     '''Gets the landmarks that surround the eyes, and returns tuple (left_eye, right_eye).'''
-    if faces_lms is None or len(faces_lms) == 0: 
-        faces_lms = get_faces_lms(frame)
-
-    # Get the first (and usually only) face's landmark data
-    face_lms = faces_lms[0]
 
     # Get the left eye landmarks
     left_eye = []
     for i in left_eye_indices:
-        if i < len(face_lms):
-            left_eye.append(face_lms[i])
+        if i < len(all_lms):
+            left_eye.append(all_lms[i])
         else:
             left_eye.append(None)  # or some default value
 
     # Get the right eye landmarks
     right_eye = []
     for i in right_eye_indices:
-        if i < len(face_lms):
-            right_eye.append(face_lms[i])
+        if i < len(all_lms):
+            right_eye.append(all_lms[i])
         else:
             right_eye.append(None)  # or some default value
 
@@ -976,13 +972,11 @@ def expand_eye_bound_lms(eye_points, factor):
     return expanded_points.tolist()
 
 
-def get_eye_bounds(frame, config, faces_lms = None):
+def get_eye_bounds(frame, config, faces_lms):
     '''Main function to process the frame and extract eye landmark data.'''
     # Get the eye landmarks
     if faces_lms is not None and len(faces_lms) > 0:
-        left_eye, right_eye = get_eye_lms_data(frame, faces_lms)
-    else:
-        left_eye, right_eye = get_eye_lms_data(frame)
+        left_eye, right_eye = pick_eyes_lm_points(faces_lms)
     
     # If that didn't work, get outta here...
     if left_eye is None or right_eye is None:
