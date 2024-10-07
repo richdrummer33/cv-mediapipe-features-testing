@@ -1,2 +1,6 @@
 opencv-python==4.10.0.82
 mediapipe==0.9.3.0
+numpy
+PyQt5
+matplotlib
+pyqtgraph
