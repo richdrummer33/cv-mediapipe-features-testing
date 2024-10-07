@@ -1,5 +1,5 @@
 Please implemen the Process() method as a c# script for unity with OpenCVForUnity (1st atttached). 
-(note:  Please.)
+(note: I also attached a second script  which is a optical flow pre-processing script for another feature in the game, for your reference.)
 
 BACKGROUND
 
@@ -15,6 +15,3 @@ APPROACH / DESIGN
 The `process` function is responsible for processing a given frame to isolate a specific color and remove non-colors.  It performs several preprocessing steps, including downscaling, Gaussian blurring, HSV conversion, median blurring,  dilation, and bitwise operations to achieve the desired output. 
 
 Additionally, it integrates with the Mediapipe Face  Mesh to obtain eye bounds and applies Optical Flow (OF) computation at different stages of the processing pipeline. - frame (numpy.ndarray): The input frame to be processed.
-
-PY SCRIPT: Attached
-

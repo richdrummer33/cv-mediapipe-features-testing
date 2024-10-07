@@ -507,19 +507,6 @@ def of_motion_compute(left_hull, right_hull, frame_grey, smoothing_factor, secon
 # ===================== IMAGE  ========================
 # =====================================================
 
-def hsv_range(config):
-    # HSV color gates (skin tone range)
-    lower_color = np.array([
-        _average_color_hsv[0] - config['hue_range'] + config['hue_offset'], 
-        config['sat_low'], 
-        config['val_low']], dtype=np.uint8)
-    upper_color = np.array([
-        _average_color_hsv[0] + config['hue_range'] + config['hue_offset'], 
-        config['sat_high'], 
-        config['val_high']], dtype=np.uint8)
-    
-    return lower_color, upper_color
-
 
 def eye_bounds_mask(frame, left_hull, right_hull):
     '''Creates a mask from the shape hulls and keeps the eye areas.'''
@@ -548,9 +535,175 @@ def CROP(frame, left_hull, right_hull):
     # Done!
     return masked_frame
 
- 
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# [gpt-01] https://chatgpt.com/c/66fda7cd-c828-8000-a3ec-cafa4fe69603
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+ 
+ 
+def sample_skin_tone(frame, lms):
+    '''
+    Samples skin tone from specific face landmarks. 
+    Returns the average HSV color.
+    '''
+    col_samples = []
+
+    # Define the neighborhood size
+    neighborhood_size = 3
+
+    # Sample pixels around the landmarks
+    for key in face_sample_spots:
+        # Some sample spots have > 1 point
+        sample_point_indexes = face_sample_spots[key]
+
+        # Sample pixels around each point
+        for pt_index in sample_point_indexes:
+            # Get the landmark point location/vect from the pt_index
+            pt = lms[pt_index]
+            pt_x, pt_y = int(pt[0]), int(pt[1])
+            # sum the pixel values in the neighborhood
+            col_sum = np.zeros(3)
+            for i in range(-neighborhood_size, neighborhood_size + 1):
+                for j in range(-neighborhood_size, neighborhood_size + 1):
+                    col_sum += frame[pt_y + i, pt_x + j]
+            # Average the pixel values
+            col_avg = col_sum / ((2 * neighborhood_size + 1) ** 2)
+            col_samples.append(col_avg)
+
+    # Return default if no samples
+    if not col_samples:
+        return _average_color_hsv 
+    
+    # Compute the mean color and convert to HSV
+    mean_color_bgr = np.mean(col_samples, axis=0)
+    average_color_bgr = np.uint8([[mean_color_bgr]])
+    ave_hsv_col = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
+    return ave_hsv_col
+
+
+def hsv_range(config, ave_hsv_col):
+    # (Same as before, but gpt-o1 modified using "max" operator)
+    # HSV color gates (skin tone range)
+    lower_color = np.array([
+        max(0, ave_hsv_col[0] - config['hue_range'] + config['hue_offset']), 
+        config['sat_low'], 
+        config['val_low']], dtype=np.uint8)
+    upper_color = np.array([
+        min(180, ave_hsv_col[0] + config['hue_range'] + config['hue_offset']), 
+        config['sat_high'], 
+        config['val_high']], dtype=np.uint8)
+    return lower_color, upper_color
+
+
+_prev_area = 0
+
+def process(frame):
+    # >>>>>>>>>>>>>>>>>>>>>>> [gpt-01] >>>>>>>>>>>>>>>>>>>>>>>>>>
+    '''Converts to HSV to isolate a color in the frame, and removes non-colors'''
+    global WindowIndex, CombinedGridFrame, _prev_area, _average_color_hsv
+    WindowIndex = 0  # Reset window index
+    area = 0
+
+    # ~~~ SET THINGS UP ~~~
+    CombinedGridFrame = None   # Grid display
+    of_frame = None     # The frame for Optical Flow computation
+    config = get_config()
+
+    # ~~~ DOWNSCALE (PERFORMANCE) ~~~
+    frame = downscale_image(frame, 1)
+    of_frame = frame  # Default to the original frame
+    CombinedGridFrame = DISPLAY_FRAME("Original", frame, CombinedGridFrame, TOTAL_FRAMES) 
+
+    # ~~~ MEDIAPIPE FACE MESH ~~~
+    # Get bounds of the eyes as convex hulls
+    left_hull, right_hull = get_eye_bounds(frame, config)
+
+    # ➡️ **New Code: Get all face landmarks and sample skin tone**
+    faces_lms = get_all_lms(frame)
+    if faces_lms and len(faces_lms) > 0:
+        _average_color_hsv = sample_skin_tone(frame, faces_lms[0])  # Assuming single face
+
+    # ➡️ **Modify hsv_range to accept average_color_hsv**
+    lo_hsv_gate, hi_hsv_gate = hsv_range(config, _average_color_hsv)
+
+    # ~~~ CONVERT TO HSV ~~~
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # ~~~ CREATE MASK BASED ON DYNAMIC HSV RANGE ~~~
+    hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
+    hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl'])
+    CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
+    # <<<<<<<<<<<<<<<<<<<<<< [gpt-01] <<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+    # ~~~ MEDIAPIPE FACE MESH ~~~
+    # Get bounds of the eyes as convex hulls (borders the eyes)
+    left_hull, right_hull = get_eye_bounds(frame, config)
+
+    if config['of_process_stage'] == 1:
+        # Apply the eye mask to the original frame, and use it for Optical Flow
+        frame = CROP(frame, left_hull, right_hull)
+        of_frame = frame
+        print("OF Stage 1 : Original Frame")
+
+    # ~~~ RUN PROCESSING STEPS ~~~
+    # == Step 1 == Gaussian blur to soften the image
+    hsv_mask_blur = cv2.GaussianBlur(frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
+
+    # == Step 2 == Convert the image to HSV color space
+    hsv_frame = cv2.cvtColor(hsv_mask_blur, cv2.COLOR_BGR2HSV)
+
+    if config['of_process_stage'] == 2:
+        # Apply the eye mask to the HSV image, and use it for Optical Flow
+        hsv_frame = CROP(hsv_frame, left_hull, right_hull)
+        of_frame = hsv_frame
+        print("OF Stage 2")
+
+    # == Step 3 == Create a mask based on the HSV range, and median blur it to remove noise
+    lo_hsv_gate, hi_hsv_gate = hsv_range(config, _average_color_hsv)
+    hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
+    hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
+    CombinedGridFrame = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedGridFrame, TOTAL_FRAMES)
+
+    # == Step 4 == Dilate the mask to make objects more connected (thick)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_kernel'], config['dilation_kernel']))
+    hsv_mask_dil = cv2.dilate(hsv_mask_blur, kernel)
+    CombinedGridFrame = DISPLAY_FRAME("HSV Mask (dilated)", hsv_mask_dil, CombinedGridFrame, TOTAL_FRAMES)
+
+    if config['of_process_stage'] == 3:
+        # Apply the eye mask to the dilated HSV mask, and use it for Optical Flow
+        hsv_mask_dil = CROP(hsv_mask_dil, left_hull, right_hull)
+        of_frame = hsv_mask_dil
+        print("OF Stage 3")
+
+    # == Step 5 == Bitwise AND the original frame with the mask to get the final output
+    hsv_masked_out = cv2.bitwise_and(frame, frame, mask=hsv_mask_dil)
+    hsv_masked_out = cv2.GaussianBlur(hsv_masked_out, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
+    CombinedGridFrame = DISPLAY_FRAME("HSV-Masked Result", hsv_masked_out, CombinedGridFrame, TOTAL_FRAMES)
+    
+    if config['of_process_stage'] == 4:
+        # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
+        hsv_masked_out = CROP(hsv_masked_out, left_hull, right_hull)
+        of_frame = hsv_masked_out
+        print("OF Stage 4")
+    
+    # == Step 6 == Compute Motion!
+    of_frame = cv2.cvtColor(of_frame, cv2.COLOR_BGR2GRAY) if len(of_frame.shape) == 3 else of_frame # grey
+    # 6A: Eye-area (dilated result)
+    hsv_masked_out_gray = cv2.cvtColor(hsv_masked_out, cv2.COLOR_BGR2GRAY)
+    area = cv2.countNonZero(hsv_masked_out_gray) # single-channel
+    area = EMA(_prev_area, area, config['eye_area_smoothing'] / 10)
+    _prev_area = area
+    # 6B: Compute the optical flow 
+    of_motion_compute(left_hull, right_hull, of_frame, config['of_smoothing'] / 10, area)
+
+    # ... Finally, DISPLAY all the steps combined
+    cv2.namedWindow("Processing Steps", cv2.WINDOW_NORMAL)
+    cv2.imshow("Processing Steps", CombinedGridFrame)
     return hsv_masked_out
+
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# https://chatgpt.com/c/66fda7cd-c828-8000-a3ec-cafa4fe69603
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
 def update(in_frame):
@@ -562,27 +715,6 @@ def update(in_frame):
     # Isolate the color
     processed_frame = process(in_frame)
     
-    # >>> Old processing steps >>>
-    if False:
-        # Convert to grayscale
-        gray_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply CLAHE to the grayscale image
-        in_frame = clahe.apply(gray_frame)
-        if sproc: combined_frame = DISPLAY_FRAME("CLAHE/grey", in_frame, combined_frame, TOTAL_FRAMES)
-
-        # Apply background subtraction
-        foreground_mask = _bg_subtractor.apply(in_frame)
-        if sproc: combined_frame = DISPLAY_FRAME("Foreground Mask", foreground_mask, combined_frame, TOTAL_FRAMES)
-
-        # Bitwise AND between grayscale and foreground mask
-        result = cv2.bitwise_and(gray_frame, foreground_mask)
-        result = cv2.equalizeHist(result)
-        if sproc: combined_frame = DISPLAY_FRAME("Equalized", result, combined_frame, TOTAL_FRAMES)
-
-        cv2.namedWindow("Combined Frame", cv2.WINDOW_NORMAL)
-        cv2.imshow("Combined Frame", combined_frame)
-    
     # Reset the indx for the row/column display mapping
     WindowIndex = 0
 
@@ -593,7 +725,7 @@ def update(in_frame):
 
 # Landmark indexes from MP Detection Manager:
 """
-Landmark indices for eye tracking:
+Face Landmark Indices:
 
 Left Eye:
 - Upper lid: 159
@@ -617,23 +749,29 @@ Right Eye:
 - Left jaw: 172
 - Right jaw: 397
 
-Note: Both eyes use the same landmarks for left jaw (172) and right jaw (397).
+Skin Tone Sampling Points:
+    Forehead: 108, 151, 337
+    Nose: 5, 51, 281
+    Left cheek: 50
+    Right cheek: 280
 """
 
-# Orig indices (good enough):
-left_eye_indices = [56, 247, 112, 110, 173, 33]
-right_eye_indices = [286, 467, 341, 339, 398, 263]
+face_sample_spots = {
+    'forehead': [108, 151, 337],
+    'nose': [5, 51, 281],
+    'left_cheek': [50],
+    'right_cheek': [280]
+}
+
 
 # Initialize the FaceMeshDetector
 print("Creating FaceMeshDetector...")
 Detector = facelms()
 print("FaceMeshDetector is created!")
 
-
-def get_all_lms(frame):
-    '''Gets all the landmarks from the frame.'''
-    img_lm, face_lm, landmarks = Detector.FindFaceMesh(frame, False)
-    return landmarks
+# Indices for encompassing the eyes for convex hulls
+left_eye_indices_bounds = [56, 247, 112, 110, 173, 33]
+right_eye_indices_bounds = [286, 467, 341, 339, 398, 263]
 
 
 def get_eye_lms_data(frame):
@@ -649,7 +787,7 @@ def get_eye_lms_data(frame):
 
     # Get the left eye landmarks
     left_eye = []
-    for i in left_eye_indices:
+    for i in left_eye_indices_bounds:
         if i < len(face_lms):
             left_eye.append(face_lms[i])
         else:
@@ -657,7 +795,7 @@ def get_eye_lms_data(frame):
 
     # Get the right eye landmarks
     right_eye = []
-    for i in right_eye_indices:
+    for i in right_eye_indices_bounds:
         if i < len(face_lms):
             right_eye.append(face_lms[i])
         else:
@@ -669,6 +807,12 @@ def get_eye_lms_data(frame):
         return None, None
 
     return left_eye, right_eye
+
+
+def get_all_lms(frame):
+    '''Gets all the landmarks from the frame.'''
+    img_lm, face_lm, landmarks = Detector.FindFaceMesh(frame, False)
+    return landmarks
 
 
 def get_eye_lms_dict(left_eye, right_eye):
