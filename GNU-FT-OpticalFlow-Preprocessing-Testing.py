@@ -59,7 +59,6 @@ TOTAL_FRAMES = 7
 COLUMNS_FRAMES = 4
 
 
-
 # =====================================================
 # ================== CGF WINDOW =======================
 # =====================================================
@@ -67,25 +66,6 @@ COLUMNS_FRAMES = 4
 # Declare global variable
 config_window = None
 config_app = None
-# Global configuration dictionary
-config_lock = threading.Lock()
-current_config = {
-    'hue_range': 25,
-    'hue_offset': 180,
-    'sat_low': 25,
-    'sat_high': 255,
-    'val_low': 85,
-    'val_high': 255,
-    'of_smoothing': 50,
-    'eye_area_smoothing': 50,
-    'eye_bounds_expand': 10,
-    'of_process_stage': 1,
-    # 'area_process_stage': 3,
-    'median_blur_knl': 3,
-    'gauss_blur_knl_pre': 3,
-    'dilation_knl_mask': 3,
-    'gauss_blur_knl_dil': 3,
-}
 
 def get_config_vals():
     global config_window
@@ -94,7 +74,7 @@ def get_config_vals():
     print("Config window is not initialized. Returning None!")
     return None
             
-
+        
 class ConfigWindow(QMainWindow):
     def __init__(self):
         global config_window
@@ -133,12 +113,11 @@ class ConfigWindow(QMainWindow):
             ('OF Smoothing Factor', 10, 100),       # divided by 10
             ('Eye-Area Smoothing Factor', 10, 100), # divided by 10
             ('Eye Bounds Expand', 10, 50),
-            # ('Area Process Stage', 1, 4),
             ('OF Process Stage', 1, 4),
             # Kernels
             ('Median Blur K (HSV mask)', 1, 25),
             ('Gauss Blur K (OG image)', 1, 25),
-            ('Dilation K (HSV-Masked)', 1, 25),
+            ('Dilation K (HSV Mask)', 1, 20),
             ('Gauss Blur K (dilated eyes)', 1, 25),
             #('CLAHE Clip Limit', 20, 100),
             #('CLAHE Grid Size', 8, 16),
@@ -150,42 +129,35 @@ class ConfigWindow(QMainWindow):
         self.sliders = {}       # Dictionary to store sliders
         self.value_labels = {}  # Dictionary to store value labels
 
+
         # 3. Add sliders to the layout
         for i, (name, default, maximum) in enumerate(sliders):
-            # Create slider
             label = QLabel(name)
             slider = QSlider(Qt.Horizontal)
-            
-            # Set slider range
             slider.setRange(0, maximum)
+            slider.setValue(default)
+            self.sliders[name] = slider  # Store slider in dictionary
 
-            # Get global default value
-            config_key = self.slider_name_to_config_key(name)
-            value = current_config.get(config_key, default)
-            print(f"The default value for {config_key} is {value}")
+            value_label = QLabel(str(default))
+            self.value_labels[name] = value_label  # Store value label in dictionary
 
-            # Set slider value and store it
-            if value is not None:
-                # Set global def value
-                slider.setValue(int(value))
-                
-                # Store slider 
-                self.sliders[name] = slider
-                
-                # Create value label
-                value_label = QLabel(str(value))
-                self.value_labels[name] = value_label
-                
-                # Callback handlers
-                slider.valueChanged.connect(lambda value, name=name: self.update_value_label(name, value))
-                slider.valueChanged.connect(self.update_config)
+            slider.valueChanged.connect(lambda value, name=name: self.update_value_label(name, value))
 
-            # Layout
             row = i % 8
             col = i // 8 * 3
             slider_layout.addWidget(label, row, col)
             slider_layout.addWidget(slider, row, col + 1)
             slider_layout.addWidget(value_label, row, col + 2)
+
+        self.image_label = QLabel()
+        layout.addWidget(self.image_label)
+
+        # 4. Set default values
+        default_config = get_config_vals()
+        for name, slider in self.sliders.items():
+            if name in default_config:
+                slider.setValue(default_config[name])
+        print("Config window Default values set!")
 
         # 5. Add Save and Load buttons
         self.image_label = QLabel()
@@ -201,24 +173,18 @@ class ConfigWindow(QMainWindow):
         layout.addLayout(button_layout)
 
     # === CLASS FUNCTIONS ===
+    @staticmethod
+    def ensure_odd(value):
+        return value if value % 2 == 1 else value + 1
+ 
     def update_value_label(self, name, value):
         if name in ['OF Smoothing Factor', 'Eye-Area Smoothing Factor']:
             display_value = value / 10.0
             self.value_labels[name].setText(f"{display_value:.1f}")
         else:
             self.value_labels[name].setText(str(value))
-    
-    def update_config(self):
-        global current_config
-        with config_lock:
-            current_config = self.get_window_config()
 
-    @staticmethod
-    def ensure_odd(value):
-        if value == 0:
-            return 0  # Return 0 if the input is 0
-        return value if value % 2 == 1 else value + 1
-    
+
     def get_window_config(self):
         """Retrieve current values from all sliders."""
         config = {
@@ -235,11 +201,10 @@ class ConfigWindow(QMainWindow):
             'eye_area_smoothing': max(10, self.sliders['Eye-Area Smoothing Factor'].value()),
             'eye_bounds_expand': self.sliders['Eye Bounds Expand'].value(),
             'of_process_stage': self.sliders['OF Process Stage'].value(),
-            # 'area_process_stage': self.sliders['Area Process Stage'].value(),
             # Kernels
             'median_blur_knl': self.ensure_odd(self.sliders['Median Blur K (HSV mask)'].value()),
             'gauss_blur_knl_pre': self.ensure_odd(self.sliders['Gauss Blur K (OG image)'].value()),
-            'dilation_knl_mask': self.ensure_odd(self.sliders['Dilation K (HSV-Masked)'].value()),
+            'dilation_knl_mask': max(1, self.sliders['Dilation K (HSV Mask)'].value()),
             'gauss_blur_knl_dil': self.ensure_odd(self.sliders['Gauss Blur K (dilated eyes)'].value()),
             #'clahe_clip_limit': self.sliders['CLAHE Clip Limit'].value() / 10.0,
             #'clahe_grid_size': self.sliders['CLAHE Grid Size'].value(),
@@ -249,26 +214,6 @@ class ConfigWindow(QMainWindow):
         }
         return config
     
-    def slider_name_to_config_key(self, slider_name):
-        # Map slider names to configuration keys
-        name_map = {
-            'Hue Range': 'hue_range',
-            'Hue Offset': 'hue_offset',
-            'Saturation Low': 'sat_low',
-            'Saturation High': 'sat_high',
-            'Value Low': 'val_low',
-            'Value High': 'val_high',
-            'OF Smoothing Factor': 'of_smoothing',
-            'Eye-Area Smoothing Factor': 'eye_area_smoothing',
-            'Eye Bounds Expand': 'eye_bounds_expand',
-            'OF Process Stage': 'of_process_stage',
-            # 'Area Process Stage': 'area_process_stage',
-            'Median Blur K (HSV mask)': 'median_blur_knl',
-            'Gauss Blur K (OG image)': 'gauss_blur_knl_pre',
-            'Dilation K (HSV-Masked)': 'dilation_knl_mask',
-            'Gauss Blur K (dilated eyes)': 'gauss_blur_knl_dil',
-        }
-        return name_map.get(slider_name, slider_name)
 
     # Save/Load 
     def save_config(self):
@@ -284,14 +229,63 @@ class ConfigWindow(QMainWindow):
             with open(file_name, 'r') as f:
                 config = json.load(f)
             self.apply_config(config)
+
+    def get_config():
+        global config_window
+        if config_window is not None:
+            return config_window.get_window_config()
+        else:
+            # Return default config or handle the error as needed
+            return {
+                # HSV color isolation
+                'hue_range': 20,
+                'hue_offset': 180,
+                # HSV thresholds
+                'sat_low': 25,
+                'sat_high': 254,
+                'val_low': 85,
+                'val_high': 254,
+                # OF
+                'of_smoothing': 25,
+                'eye_area_smoothing': 25,
+                'eye_bounds_expand': 10,
+                'of_process_stage': 1,
+                # Kernels
+                'median_blur_knl': 5,
+                'gauss_blur_knl_pre': 5,
+                'dilation_knl_mask': 8,
+                'gauss_blur_knl_dil': 5,
+                #'clahe_clip_limit': 2.0,
+                #'clahe_grid_size': 8,
+                #'bg_sub_learning_rate': 0.005,
+                #'bg_sub_history': 500,
+                #'bg_sub_var_threshold': 16,
+            }
     
     def apply_config(self, config):
         for key, value in config.items():
-            #use the map to get the slider name
-            slider_name = self.slider_name_to_config_key(key)
+            # Map config keys back to slider names
+            slider_map = {
+                'hue_range': 'Hue Range',
+                'hue_offset': 'Hue Offset',
+                'sat_low': 'Saturation Low',
+                'sat_high': 'Saturation High',
+                'val_low': 'Value Low',
+                'val_high': 'Value High',
+                'of_smoothing': 'OF Smoothing Factor',
+                'eye_area_smoothing': 'Eye-Area Smoothing Factor',
+                'eye_bounds_expand': 'Eye Bounds Expand',
+                'of_process_stage': 'OF Process Stage',
+                'median_blur_knl': 'Median Blur K (HSV mask)',
+                'gauss_blur_knl_pre': 'Gauss Blur K (OG image)',
+                'dilation_knl_mask': 'Dilation K (HSV Mask)',
+                'gauss_blur_knl_dil': 'Gauss Blur K (dilated eyes)',
+            }
+            slider_name = slider_map.get(key)
             if slider_name and slider_name in self.sliders:
                 self.sliders[slider_name].setValue(value)
                 self.update_value_label(slider_name, value)
+
                 
     
 
