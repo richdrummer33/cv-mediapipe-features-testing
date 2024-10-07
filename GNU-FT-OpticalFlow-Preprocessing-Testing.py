@@ -136,10 +136,10 @@ class ConfigWindow(QMainWindow):
             # ('Area Process Stage', 1, 4),
             ('OF Process Stage', 1, 4),
             # Kernels
-            ('Median Blur K (HSV mask)', 0, 25),
-            ('Gauss Blur K (OG image)', 0, 25),
-            ('Dilation K (HSV-Masked)', 0, 25),
-            ('Gauss Blur K (dilated eyes)', 0, 25),
+            ('Median Blur K (HSV mask)', 1, 25),
+            ('Gauss Blur K (OG image)', 1, 25),
+            ('Dilation K (HSV-Masked)', 1, 25),
+            ('Gauss Blur K (dilated eyes)', 1, 25),
             #('CLAHE Clip Limit', 20, 100),
             #('CLAHE Grid Size', 8, 16),
             #('BG Sub Learning Rate', 5, 100),
@@ -239,7 +239,7 @@ class ConfigWindow(QMainWindow):
             # Kernels
             'median_blur_knl': self.ensure_odd(self.sliders['Median Blur K (HSV mask)'].value()),
             'gauss_blur_knl_pre': self.ensure_odd(self.sliders['Gauss Blur K (OG image)'].value()),
-            'dilation_knl_mask': max(1, self.sliders['Dilation K (HSV-Masked)'].value()),
+            'dilation_knl_mask': self.ensure_odd(self.sliders['Dilation K (HSV-Masked)'].value()),
             'gauss_blur_knl_dil': self.ensure_odd(self.sliders['Gauss Blur K (dilated eyes)'].value()),
             #'clahe_clip_limit': self.sliders['CLAHE Clip Limit'].value() / 10.0,
             #'clahe_grid_size': self.sliders['CLAHE Grid Size'].value(),
