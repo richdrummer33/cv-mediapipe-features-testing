@@ -732,11 +732,12 @@ def hist_back_projection(hsv_frame, hsv_low = 0, hsv_high = 180):
     return backproj
 
 
-def of_with_hist_back_projection(config, masked_frame, left_hull, right_hull, invert = False):
+def of_with_hist_back_projection(config, hsv_result, left_hull, right_hull, invert = False):
     # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
-    inverted_frame = cv2.bitwise_not(masked_frame)    # invert color hsv_masked_out
+    inverted_frame = cv2.bitwise_not(hsv_result)    # invert color hsv_masked_out
     of_frame = hist_back_projection(inverted_frame, config['hist_hue_min'], config['hist_hue_max'])
     of_frame = CROP(of_frame, left_hull, right_hull)
+
 
 # ===========================================================
 # ===================== EYE PROCESSING ======================
@@ -833,9 +834,9 @@ def process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull):
     out_mask = cv2.morphologyEx(out_mask, cv2.MORPH_OPEN, kernel)
 
     # Bitwise AND the original frame with the mask to get the final output
-    out_bgr_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=out_mask)
+    out_hsv_masked = cv2.bitwise_and(hsv_frame, hsv_frame, mask=out_mask)
     
-    return out_mask, out_bgr_masked
+    return out_mask, out_hsv_masked
 
 
 
@@ -875,11 +876,11 @@ def process_face_mask(config, bgr_frame, left_hull, right_hull):
 
     # == Step 5 == 
     # Bitwise AND the original frame with the mask to get the final output
-    out_bgr_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=out_mask)
-    out_bgr_masked = cv2.GaussianBlur(out_bgr_masked, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
+    out_hsv_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=out_mask)
+    out_hsv_masked = cv2.GaussianBlur(out_hsv_masked, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
 
     # ... Done!
-    return out_mask, out_bgr_masked
+    return out_mask, out_hsv_masked
     
 
 def process(bgr_frame):
@@ -910,11 +911,11 @@ def process(bgr_frame):
         of_frame = CROP(mask_face, left_hull, right_hull)
     
     # PROCESSING #2: Retina-mask | face-mask (combined masks)
-    mask_retina, bgr_retina_masked = process_retina_mask(config, hsv_face_masked_result, bgr_frame, left_hull, right_hull)
+    mask_retina, hsv_retina_masked = process_retina_mask(config, hsv_face_masked_result, bgr_frame, left_hull, right_hull)
     CombinedImages = DISPLAY_FRAME("Retina-Mask", mask_retina, CombinedImages, TOTAL_FRAMES)
 
     if config['of_process_stage'] == 3:
-        of_frame = of_with_hist_back_projection(config, bgr_retina_masked, left_hull, right_hull, invert=True)
+        of_frame = of_with_hist_back_projection(config, hsv_retina_masked, left_hull, right_hull, invert=True)
     
     # COMBINE eyeball and skin masks
     mask_combined = cv2.bitwise_or(mask_face, mask_retina)
