@@ -649,7 +649,7 @@ def of_motion_compute(left_hull, right_hull, frame_grey, smoothing_factor, secon
 # ===================== IMAGE  ========================
 # =====================================================
 
-HsvColorRef = None
+ref_HsvSkinCol = None
 def get_hsv_col_ref(hsv_frame, bgr_frame):
 
     # Get and check lm results
@@ -731,130 +731,155 @@ def hist_back_projection(hsv_frame, hsv_low = 0, hsv_high = 180):
 
     return backproj
 
+
+def of_with_hist_back_projection(config, masked_frame, left_hull, right_hull, invert = False):
+    # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
+    inverted_frame = cv2.bitwise_not(masked_frame)    # invert color hsv_masked_out
+    of_frame = hist_back_projection(inverted_frame, config['hist_hue_min'], config['hist_hue_max'])
+    of_frame = CROP(of_frame, left_hull, right_hull)
+
+# ===========================================================
+# ===================== EYE PROCESSING ======================
+# ===========================================================
+
+# ~~~~~~~~~~ Retina and White Part Color Values ~~~~~~~~~~~~~~
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# ~~~ ALL PROCESSING UPDATES ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+"""
+Right Eye: 
+  - Pupil: 478
+  - Outer Retina: 471
+  - White: 469
+Left Eye:
+ - Pupil: 473
+ - Outer Retina: 476
+ - White: 474
+ """
 
-
-# filter for retinas and output only the retina shapes
-def process_retina_mask(config, bgr_frame, hsv_frame, all_lms):
-    global CombinedImages
+def get_eye_color_values(hsv_frame, eye_hull):
     """
-    Right Eye: 
-      - Pupil: 478
-      - Outer Retina: 471
-      - White: 469
-    Left Eye:
-     - Pupil: 473
-     - Outer Retina: 476
-     - White: 474
-     """
+    Find the retina and the white part of the eye and store the HSV values.
     
-    def isolate_retina(config, bgr_frame, hsv_frame, all_lms, eye_landmarks, left_hull, right_hull):
-        retina_hsv_col_ref = sample_pixels_from_lms(hsv_frame, all_lms, eye_landmarks)
-        
-        retina_mask = cv2.inRange(hsv_frame, lo_hsv_eyegate, hi_hsv_eyegate)
-        retina_mask = cv2.medianBlur(retina_mask, config['median_blur_knl'])
-        retina_mask = cv2.dilate(retina_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_knl_mask'], config['dilation_knl_mask'])))
-        retina_masked_out = cv2.bitwise_and(bgr_frame, bgr_frame, mask=retina_mask)
-        retina_masked_out = cv2.GaussianBlur(retina_masked_out, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
-        return retina_masked_out
-
-    def hsv_color_ref_eyes(hsv_frame, bgr_frame):
-        faces_lms = get_faces_lms(bgr_frame) # One face only
-        if not faces_lms or len(faces_lms) == 0:
-            return _average_color_hsv
-        try:
-            landmark_sets = [
-                [473, 476],  # Left eye
-                [478, 471],  # Right eye
-            ]
-            return sample_pixels_from_lms(hsv_frame, faces_lms[0], landmark_sets)
-        except:
-            print("Error sampling retinas (no landmarks... yet)")
-
-    # def that finds the color of the eyes by searching the pixels starting from the center of the hulls
-    def hsv_color_ref_eyes(hsv_frame, bgr_frame, hull):
-        faces_lms = get_faces_lms(bgr_frame) # One face only
-        if not faces_lms or len(faces_lms) == 0:
-            return _average_color_hsv
-        try:
-            # find the retina and the white part of the eye and store the hsv values
-            
-
+    :param hsv_frame: HSV image of the face
+    :param eye_hull: Convex hull of the eye region
+    :return: HSV values for retina and white part of the eye
+    """
+    # Create a mask for the eye region
+    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [eye_hull], 0, 255, -1)
     
-    # Get the HSV color reference for the retinas
-    print("Getting HSV color reference for retinas...")
-    # hsv_retina_colref = hsv_color_ref_eyes(hsv_frame, bgr_frame)
-    lo_hsv_eyegate, hi_hsv_eyegate = hsv_range(config, hsv_retina_colref)
+    # Extract the eye region
+    eye_region = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
     
-    # Do the masking 
-    print("Isolating retinas...")
-    left_retina_masked_out = isolate_retina(config, bgr_frame, hsv_frame, all_lms, [[473, 476]])
-    right_retina_masked_out = isolate_retina(config, bgr_frame, hsv_frame, all_lms, [[478, 471]])
+    # Separate the eye region into its HSV components
+    h, s, v = cv2.split(eye_region)
     
-    # Combine the two retina images side by side
-    print("Combining retinas...")
-    combined_retinas = np.hstack((left_retina_masked_out, right_retina_masked_out))
+    # Find the darkest area (retina) and the brightest area (white part)
+    retina_mask = (v == np.min(v[np.nonzero(mask)]))
+    white_mask = (v == np.max(v[np.nonzero(mask)]))
+    
+    # Get average HSV values for retina and white part
+    retina_hsv = np.mean(eye_region[retina_mask], axis=0)
+    white_hsv = np.mean(eye_region[white_mask], axis=0)
+    
+    return retina_hsv, white_hsv
 
-    print("Retinas processed!")
-    CombinedImages = DISPLAY_FRAME("Retinas", combined_retinas, CombinedImages, TOTAL_FRAMES)
-    return combined_retinas
+def process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull):
+    """
+    Create a mask that isolates the eyeballs using both retina and white part color ranges.
+    
+    :param hsv_frame: HSV image of the face
+    :param left_hull: Convex hull of the left eye region
+    :param right_hull: Convex hull of the right eye region
+    :param config: Configuration dictionary
+    :return: Binary mask of the eyeballs
+    """
+
+    # if the hsv_mask is all black, then we can't do anything
+    if np.all(hsv_frame == 0):
+        print("HSV Mask is all black. Skipping...") 
+        return hsv_frame
+
+    # Get color values for both eyes
+    left_retina_hsv, left_white_hsv = get_eye_color_values(hsv_frame, left_hull)
+    right_retina_hsv, right_white_hsv = get_eye_color_values(hsv_frame, right_hull)
+    
+    # Average the values from both eyes
+    retina_hsv = (left_retina_hsv + right_retina_hsv) / 2
+    white_hsv = (left_white_hsv + right_white_hsv) / 2
+    
+    # Create color ranges for retina and white part
+    retina_lower = np.array([max(0, retina_hsv[0] - 10), 50, 0], dtype=np.uint8)
+    retina_upper = np.array([min(180, retina_hsv[0] + 10), 255, 100], dtype=np.uint8)
+    
+    white_lower = np.array([0, 0, max(0, white_hsv[2] - 50)], dtype=np.uint8)
+    white_upper = np.array([180, 30, 255], dtype=np.uint8)
+
+    # Create masks for retina and white part
+    retina_mask = cv2.inRange(hsv_frame, retina_lower, retina_upper) 
+    white_mask = cv2.inRange(hsv_frame, white_lower, white_upper)
+    # NOTE: inRange will throw errrors in the following cases:
+    # - if the lower bound is greater than the upper bound
+    # - if the lower bound is greater than 180
+    # - if the upper bound is less than 0
+    # - if the frame is not in the correct format (e.g., not 3 channels)
+    
+    # Combine masks
+    out_mask = cv2.bitwise_or(retina_mask, white_mask)
+    
+    # Apply morphological operations to clean up the mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_knl_mask'], config['dilation_knl_mask']))
+    out_mask = cv2.morphologyEx(out_mask, cv2.MORPH_CLOSE, kernel)
+    out_mask = cv2.morphologyEx(out_mask, cv2.MORPH_OPEN, kernel)
+
+    # Bitwise AND the original frame with the mask to get the final output
+    out_bgr_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=out_mask)
+    
+    return out_mask, out_bgr_masked
 
 
 
 def process_face_mask(config, bgr_frame, left_hull, right_hull):
-    global CombinedImages
+    global CombinedImages, ref_HsvSkinCol
 
     # == Step 1 == 
     # Gaussian blur to soften the image
-    hsv_mask_blur = cv2.GaussianBlur(bgr_frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
+    mask_blurred = cv2.GaussianBlur(bgr_frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
+
 
     # == Step 2 == 
     # Convert the image to HSV color space
-    hsv_frame = cv2.cvtColor(hsv_mask_blur, cv2.COLOR_BGR2HSV)
-    HsvColorRef = get_hsv_col_ref(hsv_frame, bgr_frame)
+    hsv_frame = cv2.cvtColor(mask_blurred, cv2.COLOR_BGR2HSV)
+    ref_HsvSkinCol = get_hsv_col_ref(hsv_frame, bgr_frame)
     CombinedImages = DISPLAY_FRAME("HSV", hsv_frame, CombinedImages, TOTAL_FRAMES)
 
-    if config['of_process_stage'] == 2:
-        # Apply the eye mask to the HSV image, and use it for Optical Flow
-        of_frame = CROP(hsv_frame, left_hull, right_hull)
 
     # == Step 3 == 
     # Get HSV range
-    lo_hsv_gate, hi_hsv_gate = hsv_range(config, HsvColorRef)
-    try:  hsv_mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate)
+    lo_hsv_gate, hi_hsv_gate = hsv_range(config, ref_HsvSkinCol)
+    try:  mask = cv2.inRange(hsv_frame, lo_hsv_gate, hi_hsv_gate) # this outputs a binary mask (colors are either 0 or 255)
     except:
         print("Error creating HSV mask (no landmarks... yet)")
         return bgr_frame
     # Create a mask based on the HSV range, and median blur it to remove noise
-    hsv_mask_blur = cv2.medianBlur(hsv_mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
-    CombinedImages = DISPLAY_FRAME("HSV Mask", hsv_mask_blur, CombinedImages, TOTAL_FRAMES)
+    mask_blurred = cv2.medianBlur(mask, config['median_blur_knl']) # Median blur differs from gaussian blur in that it takes the median of all the pixels under the kernel area and the central element is replaced with this median value
+    CombinedImages = DISPLAY_FRAME("HSV Mask", mask_blurred, CombinedImages, TOTAL_FRAMES)
+
 
     # == Step 4 == 
     # Dilate the mask to make objects more connected (thick)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config['dilation_knl_mask'], config['dilation_knl_mask']))
-    hsv_mask_dil = cv2.dilate(hsv_mask_blur, kernel)
-    CombinedImages = DISPLAY_FRAME("HSV Mask (dilated)", hsv_mask_dil, CombinedImages, TOTAL_FRAMES)
-    if config['of_process_stage'] == 3:
-        # Apply the eye mask to the dilated HSV mask, and use it for Optical Flow
-        of_frame = CROP(hsv_mask_dil, left_hull, right_hull)
+    out_mask = cv2.dilate(mask_blurred, kernel)
+    CombinedImages = DISPLAY_FRAME("HSV Mask (dilated)", out_mask, CombinedImages, TOTAL_FRAMES)
+
 
     # == Step 5 == 
     # Bitwise AND the original frame with the mask to get the final output
-    hsv_masked_out = cv2.bitwise_and(bgr_frame, bgr_frame, mask=hsv_mask_dil)
-    hsv_masked_out = cv2.GaussianBlur(hsv_masked_out, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
-    CombinedImages = DISPLAY_FRAME("HSV-Masked Result", hsv_masked_out, CombinedImages, TOTAL_FRAMES)
-    if config['of_process_stage'] == 4:
-        # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
-        hsv_masked_out = cv2.bitwise_not(hsv_masked_out)    # invert color hsv_masked_out
-        of_frame = hist_back_projection(hsv_masked_out, config['hist_hue_min'], config['hist_hue_max'])
-        CombinedImages = DISPLAY_FRAME("Back Projection", of_frame, CombinedImages, TOTAL_FRAMES)
-        of_frame = CROP(of_frame, left_hull, right_hull)
+    out_bgr_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=out_mask)
+    out_bgr_masked = cv2.GaussianBlur(out_bgr_masked, (config['gauss_blur_knl_dil'], config['gauss_blur_knl_dil']), 0)
 
-    # Done!
-    return hsv_masked_out, of_frame
+    # ... Done!
+    return out_mask, out_bgr_masked
     
 
 def process(bgr_frame):
@@ -864,25 +889,49 @@ def process(bgr_frame):
 
     # Setup
     CombinedImages = None   # grid display (stacks images each time DISPLAY_FRAME is called)
-    of_frame = None     # The frame OF is computed from
     config = get_config_vals()
-
-    # Downsize
     bgr_frame = downscale_image(bgr_frame, 1)
-    of_frame = bgr_frame # default to the original frame
+    of_frame = bgr_frame
     CombinedImages = DISPLAY_FRAME("Original", bgr_frame, CombinedImages, TOTAL_FRAMES) 
     
     # Eye bounds (convex hulls)
     left_hull, right_hull = get_eye_bounds(bgr_frame, config)
+    print("Left Hull:", left_hull, "Right Hull:", right_hull)
     if config['of_process_stage'] == 1:
-        # Apply the eye mask to the original frame, and use it for Optical Flow
+        print("Applying eye mask to original frame.")
         of_frame = CROP(bgr_frame, left_hull, right_hull)
     
-    # Processing 
-    hsv_masked_out, of_frame = process_face_mask(config, bgr_frame.copy(), left_hull, right_hull)
-    retina_masked_out = process_retina_mask(config, bgr_frame, hsv_masked_out, get_faces_lms(bgr_frame))
- 
+    # PROCESSING #1: HSV Masking 
+    mask_face, hsv_face_masked_result = process_face_mask(config, bgr_frame, left_hull, right_hull)
+    CombinedImages = DISPLAY_FRAME("Face Masked Result", hsv_face_masked_result, CombinedImages, TOTAL_FRAMES)
+
+    if config['of_process_stage'] == 2:
+        # Apply the eye mask to the dilated HSV mask, and use it for Optical Flow
+        of_frame = CROP(mask_face, left_hull, right_hull)
+    
+    # PROCESSING #2: Retina-mask | face-mask (combined masks)
+    mask_retina, bgr_retina_masked = process_retina_mask(config, hsv_face_masked_result, bgr_frame, left_hull, right_hull)
+    CombinedImages = DISPLAY_FRAME("Retina-Mask", mask_retina, CombinedImages, TOTAL_FRAMES)
+
+    if config['of_process_stage'] == 3:
+        of_frame = of_with_hist_back_projection(config, bgr_retina_masked, left_hull, right_hull, invert=True)
+    
+    # COMBINE eyeball and skin masks
+    mask_combined = cv2.bitwise_or(mask_face, mask_retina)
+    CombinedImages = DISPLAY_FRAME("Combined Mask", mask_combined, CombinedImages, TOTAL_FRAMES)
+
+    # APPLY the combined mask to with bitwise_and to the original frame
+    bgr_combined_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=mask_combined)
+
+    if config['of_process_stage'] == 4:
+        of_frame = of_with_hist_back_projection(config, bgr_combined_masked, left_hull, right_hull, invert=True)
+
+    # AND the mask with the original BGR frame to get the final color output
+    # bgr_result = cv2.bitwise_and(bgr_frame, bgr_frame, mask=combined_mask)    
+
     # Motion calculation
+    # print the of_frame properties
+    print("OF Frame:", of_frame.shape, of_frame.dtype)
     calculate_motion(config, of_frame, left_hull, right_hull)
 
     # ... Finally, DISPLAY all the steps combined
@@ -912,7 +961,7 @@ def calculate_motion(config, of_frame, left_hull, right_hull):
 
 
 def update(in_frame):
-    global WindowIndex, HsvColorRef
+    global WindowIndex
 
     # Multi-image display
     combined_frame = None
