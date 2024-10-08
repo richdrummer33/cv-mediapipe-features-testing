@@ -1,0 +1,1 @@
+{"hue_range": 77, "hue_offset": 43, "sat_low": 0, "sat_high": 177, "val_low": 0, "val_high": 128, "of_smoothing": 50, "eye_area_smoothing": 50, "eye_bounds_expand": 12, "of_process_stage": 4, "median_blur_knl": 5, "gauss_blur_knl_pre": 5, "dilation_knl_mask": 9, "gauss_blur_knl_dil": 3}
