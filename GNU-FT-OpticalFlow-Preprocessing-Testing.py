@@ -732,7 +732,7 @@ def hist_back_projection(hsv_frame, hsv_low = 0, hsv_high = 180):
     return backproj
 
 
-def of_with_hist_back_projection(config, hsv_result, left_hull, right_hull, invert = False):
+def of_apply_histogram(config, hsv_result, left_hull, right_hull, invert = False):
     # Apply the eye mask to the final hsv-masked frame, and use it for Optical Flow
     inverted_frame = cv2.bitwise_not(hsv_result)    # invert color hsv_masked_out
     of_frame = hist_back_projection(inverted_frame, config['hist_hue_min'], config['hist_hue_max'])
@@ -840,17 +840,11 @@ def process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull):
 
 
 
-def process_face_mask(config, bgr_frame, left_hull, right_hull):
+def process_face_mask(config, bgr_frame, hsv_frame, left_hull, right_hull):
     global CombinedImages, ref_HsvSkinCol
-
-    # == Step 1 == 
-    # Gaussian blur to soften the image
-    mask_blurred = cv2.GaussianBlur(bgr_frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
-
 
     # == Step 2 == 
     # Convert the image to HSV color space
-    hsv_frame = cv2.cvtColor(mask_blurred, cv2.COLOR_BGR2HSV)
     ref_HsvSkinCol = get_hsv_col_ref(hsv_frame, bgr_frame)
     CombinedImages = DISPLAY_FRAME("HSV", hsv_frame, CombinedImages, TOTAL_FRAMES)
 
@@ -895,6 +889,10 @@ def process(bgr_frame):
     of_frame = bgr_frame
     CombinedImages = DISPLAY_FRAME("Original", bgr_frame, CombinedImages, TOTAL_FRAMES) 
     
+    # Soften and HSV-conversion
+    mask_blurred = cv2.GaussianBlur(bgr_frame, (config['gauss_blur_knl_pre'], config['gauss_blur_knl_pre']), 0)
+    hsv_frame = cv2.cvtColor(mask_blurred, cv2.COLOR_BGR2HSV)
+
     # Eye bounds (convex hulls)
     left_hull, right_hull = get_eye_bounds(bgr_frame, config)
     print("Left Hull:", left_hull, "Right Hull:", right_hull)
@@ -903,7 +901,7 @@ def process(bgr_frame):
         of_frame = CROP(bgr_frame, left_hull, right_hull)
     
     # PROCESSING #1: HSV Masking 
-    mask_face, hsv_face_masked_result = process_face_mask(config, bgr_frame, left_hull, right_hull)
+    mask_face, hsv_face_masked_result = process_face_mask(config, bgr_frame, hsv_frame, left_hull, right_hull)
     CombinedImages = DISPLAY_FRAME("Face Masked Result", hsv_face_masked_result, CombinedImages, TOTAL_FRAMES)
 
     if config['of_process_stage'] == 2:
@@ -911,11 +909,11 @@ def process(bgr_frame):
         of_frame = CROP(mask_face, left_hull, right_hull)
     
     # PROCESSING #2: Retina-mask | face-mask (combined masks)
-    mask_retina, hsv_retina_masked = process_retina_mask(config, hsv_face_masked_result, bgr_frame, left_hull, right_hull)
+    mask_retina, hsv_retina_masked = process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull)
     CombinedImages = DISPLAY_FRAME("Retina-Mask", mask_retina, CombinedImages, TOTAL_FRAMES)
 
     if config['of_process_stage'] == 3:
-        of_frame = of_with_hist_back_projection(config, hsv_retina_masked, left_hull, right_hull, invert=True)
+        of_frame = of_apply_histogram(config, hsv_retina_masked, left_hull, right_hull, invert=True)
     
     # COMBINE eyeball and skin masks
     mask_combined = cv2.bitwise_or(mask_face, mask_retina)
@@ -925,17 +923,15 @@ def process(bgr_frame):
     bgr_combined_masked = cv2.bitwise_and(bgr_frame, bgr_frame, mask=mask_combined)
 
     if config['of_process_stage'] == 4:
-        of_frame = of_with_hist_back_projection(config, bgr_combined_masked, left_hull, right_hull, invert=True)
+        of_frame = of_apply_histogram(config, bgr_combined_masked, left_hull, right_hull, invert=True)
 
-    # AND the mask with the original BGR frame to get the final color output
-    # bgr_result = cv2.bitwise_and(bgr_frame, bgr_frame, mask=combined_mask)    
+    # MOTION calculation
+    try:
+        calculate_motion(config, of_frame, left_hull, right_hull)
+    except Exception as e:
+        print("Error calculating motion:", e)
 
-    # Motion calculation
-    # print the of_frame properties
-    print("OF Frame:", of_frame.shape, of_frame.dtype)
-    calculate_motion(config, of_frame, left_hull, right_hull)
-
-    # ... Finally, DISPLAY all the steps combined
+    # DISPLAY images
     cv2.namedWindow("Processing Steps", cv2.WINDOW_NORMAL)
     cv2.imshow("Processing Steps", CombinedImages)
 
@@ -963,36 +959,8 @@ def calculate_motion(config, of_frame, left_hull, right_hull):
 
 def update(in_frame):
     global WindowIndex
-
-    # Multi-image display
-    combined_frame = None
-
-    # Isolate the color
-    processed_frame = process(in_frame)
-    
-    # >>> Old processing steps >>>
-    if False:
-        # Convert to grayscale
-        gray_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply CLAHE to the grayscale image
-        in_frame = clahe.apply(gray_frame)
-        if sproc: combined_frame = DISPLAY_FRAME("CLAHE/grey", in_frame, combined_frame, TOTAL_FRAMES)
-
-        # Apply background subtraction
-        foreground_mask = _bg_subtractor.apply(in_frame)
-        if sproc: combined_frame = DISPLAY_FRAME("Foreground Mask", foreground_mask, combined_frame, TOTAL_FRAMES)
-
-        # Bitwise AND between grayscale and foreground mask
-        result = cv2.bitwise_and(gray_frame, foreground_mask)
-        result = cv2.equalizeHist(result)
-        if sproc: combined_frame = DISPLAY_FRAME("Equalized", result, combined_frame, TOTAL_FRAMES)
-
-        cv2.namedWindow("Combined Frame", cv2.WINDOW_NORMAL)
-        cv2.imshow("Combined Frame", combined_frame)
-    
-    # Reset the indx for the row/column display mapping
-    WindowIndex = 0
+    process(in_frame)
+    WindowIndex = 0 # Reset for row/column display map
 
 
 # =====================================================
