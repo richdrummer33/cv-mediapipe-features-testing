@@ -58,9 +58,6 @@ _average_color_hsv = cv2.cvtColor(average_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
 _REF_skin_hsv = _average_color_hsv
 print("Average HSV color:", _average_color_hsv)
 
-_CombinedImages = None
-TOTAL_FRAMES = 11
-COLUMNS_FRAMES = 6
 
 
 # =====================================================
@@ -323,6 +320,9 @@ class ConfigWindow(QMainWindow):
 # =====================================================
 
 WindowIndex = 0
+_CombinedImages = None
+TOTAL_FRAMES = 10
+COLUMNS_FRAMES = 6
 
 def DISPLAY_FRAME(window_name, img_frame, combined_frame, num_images):
     """
@@ -567,10 +567,12 @@ end_level = 5
 
 # Optical Flow Variables
 prev_grey = None
-prev_left_centroid = None
-prev_right_centroid = None
-motion_history_left = deque(maxlen=100)  # Stores last 100 motion magnitudes for left eye
-motion_history_right = deque(maxlen=100)  # Stores last 100 motion magnitudes for right eye
+
+# UNUSED:
+# prev_left_centroid = None
+# prev_right_centroid = None
+# motion_history_left = deque(maxlen=100)  # Stores last 100 motion magnitudes for left eye
+# motion_history_right = deque(maxlen=100)  # Stores last 100 motion magnitudes for right eye
 
 # Smoothed motion values
 smoothed_left_motion = None
@@ -810,105 +812,187 @@ Left Eye:
 #     return REF_retina_hsv, REF_white_hsv
 
 
+# >>>>>>>>>>>>>>>>>>>>>>>> RETINA MASKING >>>>>>>>>>>>>>>>>>>>>>>>
 _REF_retina_hsv = None
 _REF_white_hsv = None
 _last_left_hull = None
 _last_right_hull = None
 _last_mask = None
 
-# NOTE: https://claude.ai/chat/e3322b61-2533-4d26-895c-e2aae3f5a8b3
-def process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull):
+# https://chatgpt.com/c/67058121-ae48-8000-a237-68c5b27d3637?model=o1-preview
+config = {
+    'hough_params': {
+        'dp': 1.2,
+        'min_dist': 20,
+        'param1': 50,
+        'param2': 20,  # Lowering param2 may detect more circles
+        'min_radius': 5,  # Reduce min_radius to cover smaller irises
+        'max_radius': 50  # Increase max_radius to cover larger irises
+    }
+}
+
+# https://chatgpt.com/c/67058121-ae48-8000-a237-68c5b27d3637?model=o1-preview
+def preprocess_eye_region(eye_roi):
     """
-    Create a mask that isolates the eyeballs by finding pixels most different from the skin tone.
-    
-    :param config: Configuration dictionary
-    :param hsv_frame: HSV image of the face
-    :param bgr_frame: BGR image of the face
-    :param left_hull: Convex hull of the left eye region
-    :param right_hull: Convex hull of the right eye region
-    :return: Binary mask of the eyeballs, HSV-masked frame
+    Preprocess the eye region to enhance features for circle detection.
+
+    :param eye_roi: Grayscale image of the eye region.
+    :return: Preprocessed image.
     """
-    global _REF_skin_hsv, _REF_retina_hsv, _REF_white_hsv, _CombinedImages, _last_left_hull, _last_right_hull, _last_mask
+    # Apply Gaussian Blur to reduce noise
+    blurred = cv2.GaussianBlur(eye_roi, (9, 9), 2)
 
-    # If the hsv_frame is all black, we can't do anything
-    if np.all(hsv_frame == 0):
-        print("HSV Mask is all black. Skipping...")
-        return np.zeros_like(hsv_frame[:,:,0]), hsv_frame
+    # Apply CLAHE for contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(blurred)
+
+    return enhanced
+
+def detect_iris_circle(preprocessed_eye, dp=1.2, min_dist=30, param1=50, param2=30, min_radius=15, max_radius=40):
+    """
+    Detect the iris as a circle using Hough Circle Transform.
+
+    :param preprocessed_eye: Preprocessed grayscale eye image.
+    :param dp: Inverse ratio of accumulator resolution to image resolution.
+    :param min_dist: Minimum distance between detected centers.
+    :param param1: Higher threshold for Canny edge detector.
+    :param param2: Accumulator threshold for circle detection.
+    :param min_radius: Minimum circle radius.
+    :param max_radius: Maximum circle radius.
+    :return: (x, y, radius) of the detected circle or None if not found.
+    """
+    # circles = cv2.HoughCircles(preprocessed_eye, cv2.HOUGH_GRADIENT, dp=dp, minDist=min_dist,
+    #                            param1=param1, param2=param2,
+    #                            minRadius=min_radius, maxRadius=max_radius)
     
-    # if left or right hull are zero or none, set them to the last known values
-    if left_hull is None:
-        left_hull = _last_left_hull
-    if right_hull is None:
-        right_hull = _last_right_hull
-    _last_right_hull, _last_left_hull = right_hull, left_hull
+    circles = cv2.HoughCircles(...)
+    print("Detected circles:", circles)
 
-    # STEP 1: Crop the frame to the eye regions
-    cropped_frame = CROP(hsv_frame, left_hull, right_hull)
-    DISPLAY_FRAME("Cropped Retina", cropped_frame, _CombinedImages, TOTAL_FRAMES)
-
-    # STEP 2: Find the pixel most different from the skin tone
-    h_diff = np.minimum(np.abs(cropped_frame[:,:,0] - _REF_skin_hsv[0]), 
-                        180 - np.abs(cropped_frame[:,:,0] - _REF_skin_hsv[0])) / 90.0
-    s_diff = np.abs(cropped_frame[:,:,1] - _REF_skin_hsv[1]) / 255.0
-    v_diff = np.abs(cropped_frame[:,:,2] - _REF_skin_hsv[2]) / 255.0
-    
-    diff_map = (h_diff + s_diff + v_diff) / 3.0
-    max_diff_coords = np.unravel_index(np.argmax(diff_map), diff_map.shape) # The pixel with the maximum difference
-
-    # STEP 3: Find adjacent pixels that are also significantly different from the skin tone
-    # 3.1: Find the maximum difference in the difference map
-    max_diff = np.max(diff_map)
-    avg_diff = np.mean(diff_map)
-    threshold = min(avg_diff, max_diff * config['retina_threshold'] / 100.0) 
-    print(f"Max diff: {max_diff}, Avg diff: {avg_diff}, Threshold: {threshold}")
-
-    seed_point = max_diff_coords[::-1]  # This is the coord for cv2.floodFill to start from (roughly the most different pixel)
-    mask = np.zeros((cropped_frame.shape[0]+2, cropped_frame.shape[1]+2), np.uint8) # ⭐ UPDATED
-
-    # 3.2: Convert threshold back to 0-255 range for floodFill
-    fill_threshold = (int(threshold * 255),) * 3  # (⭐ UPDATED) NOTE: Adjust multiplier as needed.
-    # Fills the area around the seed point that is significantly different from the skin tone    
-    cv2.floodFill(cropped_frame, mask, seedPoint=seed_point, newVal=(255, 255, 255),    # ⭐ UPDATED
-                  loDiff=fill_threshold, upDiff=fill_threshold,                         # threshold should range from 0 to 255
-                  flags=8 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY)                       # If the threshold value is higher, sensitivity is lower
-    # Invert the mask so that the inside is white and the outside is black
-    mask = cv2.bitwise_not(mask) # ⭐ I ADDED
-    # Remove the added border from the mask
-    mask = mask[1:-1, 1:-1] # ⭐ ADDED
-
-    # STEP 4: If the mask is still empty, fall back to a simple threshold
-    if np.sum(mask) == 0:
-        print("Flood fill failed. Using simple threshold...")
-        if _last_mask is not None:
-            mask = _last_mask
-        else:
-            print("No mask found. Skipping...")
-            return np.zeros_like(hsv_frame[:,:,0]), hsv_frame
-            
-    _last_mask = mask
-    DISPLAY_FRAME("Final Mask", mask, _CombinedImages, TOTAL_FRAMES)
-
-    # Step 4: Create a mask based on the average value of these pixels
-    # eye_pixels = cropped_frame[mask == 255]
-    # if len(eye_pixels) > 0:
-    #     avg_eye_color = np.mean(eye_pixels, axis=0)
-    #     lower_bound = np.array([max(0, avg_eye_color[i] - 20) for i in range(3)], dtype=np.uint8)
-    #     upper_bound = np.array([min(255, avg_eye_color[i] + 20) for i in range(3)], dtype=np.uint8)
-    #     eye_mask = cv2.inRange(cropped_frame, lower_bound, upper_bound)
+    # if circles is not None:
+    #     circles = np.uint16(np.around(circles))
+    #     # Assuming the first detected circle is the iris
+    #     return circles[0][0]
     # else:
-    #     print("No eye pixels found. Using original mask.")
-    #     eye_mask = mask
+    #     return None
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        for i in circles[0, :]:
+            cv2.circle(preprocessed_eye, (i[0], i[1]), i[2], (255, 255, 255), 2)
+        cv2.imshow('Detected Circles', preprocessed_eye)
+        cv2.waitKey(0)
+        return circles[0][0]
+    else:
+        return None
 
-    # Apply morphological operations to clean up the mask
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5)) # (config['dilation_knl_mask'], config['dilation_knl_mask']))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    # Step 5: Apply the mask to the original image
-    out_hsv_masked = cv2.bitwise_and(cropped_frame, cropped_frame, mask=mask) # ⭐ CHANGED from cropped_frame to hsv_frame
-    DISPLAY_FRAME("Retina Final Result", out_hsv_masked, _CombinedImages, TOTAL_FRAMES)
-    
-    return mask, out_hsv_masked
+def create_circle_mask(shape, circle):
+    """
+    Create a binary mask with a filled circle.
+
+    :param shape: Shape of the mask (height, width).
+    :param circle: (x, y, radius) of the circle.
+    :return: Binary mask.
+    """
+    mask = np.zeros(shape, dtype=np.uint8)
+    if circle is not None:
+        cv2.circle(mask, (circle[0], circle[1]), circle[2], 255, thickness=-1)
+    return mask
+
+
+# def process_eye(eye_roi, circle_params):
+#     """
+#     Process a single eye region to detect iris and create a mask.
+# 
+#     :param eye_roi: BGR image of the eye region.
+#     :param circle_params: Dictionary of parameters for HoughCircles.
+#     :return: Binary mask of the iris.
+#     """
+#     # Convert to grayscale
+#     gray_eye = cv2.cvtColor(eye_roi, cv2.COLOR_BGR2GRAY)
+# 
+#     # Preprocess the eye region
+#     preprocessed = preprocess_eye_region(gray_eye)
+# 
+#     # Detect iris circle
+#     circle = detect_iris_circle(preprocessed, **circle_params)
+# 
+#     # Create mask
+#     mask = create_circle_mask(gray_eye.shape, circle)
+# 
+#     return mask
+
+
+def process_retina_mask(config, bgr_frame, left_hull, right_hull):
+    """
+    Create a mask that isolates the eyeballs by detecting the iris as a circle.
+
+    :param config: Configuration dictionary containing HoughCircles parameters.
+    :param bgr_frame: BGR image of the face.
+    :param left_hull: Convex hull of the left eye region (numpy array of points).
+    :param right_hull: Convex hull of the right eye region (numpy array of points).
+    :return: Binary mask of the eyeballs.
+    """
+    global _CombinedImages
+    # Initialize the final mask
+    final_mask = np.zeros(bgr_frame.shape[:2], dtype=np.uint8)
+
+    # Process each eye
+    for eye_hull in [left_hull, right_hull]:
+        if eye_hull is not None and len(eye_hull) > 0:
+            # Create a bounding rectangle around the hull
+            x, y, w, h = cv2.boundingRect(eye_hull)
+
+            # Crop the eye region from the frame
+            eye_roi = bgr_frame[y:y+h, x:x+w]
+
+            # Process the eye to get the iris mask
+            iris_mask = process_eye(eye_roi) #, config.get('hough_params', {}))
+            
+            # Resize the mask to the original frame size
+            resized_mask = np.zeros_like(final_mask)
+            resized_mask[y:y+h, x:x+w] = iris_mask
+
+            # Combine with the final mask
+            final_mask = cv2.bitwise_or(final_mask, resized_mask)
+            # DISPLAY_FRAME("Iris Mask", iris_mask, _CombinedImages, TOTAL_FRAMES)
+
+    # Post-processing: Morphological operations to refine the mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, kernel)
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
+    DISPLAY_FRAME("Final Iris Mask", final_mask, _CombinedImages, TOTAL_FRAMES)
+
+    return final_mask
+
+hsv_eye = None
+# simplified version
+def process_eye(eye_roi):
+    global hsv_eye
+    hsv_eye = cv2.cvtColor(eye_roi, cv2.COLOR_BGR2HSV)
+    # Blur  the eye region
+    eye_roi = cv2.GaussianBlur(eye_roi, (3, 3), 0)
+
+    # Define HSV thresholds (adjust based on your findings)
+    lower_hsv = np.array([0, 0, 0])
+    upper_hsv = np.array([30, 75, 125])
+
+    # Generates white where the vals fall within the range
+    mask = cv2.inRange(hsv_eye, lower_hsv, upper_hsv)
+
+    # greyscale it fo Adaptive Thresholding
+    gray_eye = cv2.cvtColor(eye_roi, cv2.COLOR_BGR2GRAY)
+    mask_gray = cv2.adaptiveThreshold(gray_eye, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                    cv2.THRESH_BINARY_INV, 11, 2)
+
+    combined_mask = cv2.bitwise_and(mask, mask_gray)
+
+    # Combine the two masks
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+
+    return mask
+# <<<<<<<<<<<<<<< RETINA MASKING <<<<<<<<<<<<<<<
 
 
 def process_face_mask(config, bgr_frame, hsv_frame, left_hull, right_hull):
@@ -977,7 +1061,8 @@ def process(bgr_frame):
         of_frame = CROP(mask_face, left_hull, right_hull)
     
     # PROCESSING #2: Retina-mask | face-mask (combined masks)
-    mask_retina, hsv_retina_masked = process_retina_mask(config, hsv_frame, bgr_frame, left_hull, right_hull)
+    mask_retina = process_retina_mask(config, bgr_frame, left_hull, right_hull)
+    hsv_retina_masked = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask_retina) # apply the mask
 
     if config['of_process_stage'] == 3:
         of_frame = of_apply_histogram(config, hsv_retina_masked, invert=True)
@@ -1236,6 +1321,34 @@ def video_capture_loop():
     cv2.destroyAllWindows()
 
 
+def plt_hist():
+    plt.ion()  # Turn on interactive mode
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(8, 10))
+    
+    while True:
+        if hsv_eye is None:
+            Time.sleep(0.1)
+            continue
+        
+        h, s, v = cv2.split(hsv_eye)
+        
+        ax1.clear()
+        ax2.clear()
+        ax3.clear()
+        
+        ax1.hist(h.ravel(), bins=180, range=[0,180], color='r')
+        ax2.hist(s.ravel(), bins=256, range=[0,256], color='g')
+        ax3.hist(v.ravel(), bins=256, range=[0,256], color='b')
+        
+        ax1.set_title('Hue')
+        ax2.set_title('Saturation')
+        ax3.set_title('Value')
+        
+        plt.tight_layout()
+        plt.draw()
+        plt.pause(0.5)  # Add a small pause to allow the plot to update
+
+
 def main():
     global _fps, WindowIndex, config_window, config_app
 
@@ -1255,9 +1368,13 @@ def main():
     # Start video processing in a separate daemon thread
     video_thread = threading.Thread(target=video_capture_loop, args=(), daemon=True)
     video_thread.start()
+    
+    # plt_hist()
 
     # Execute the PyQt5 application in the main thread
     sys.exit(config_app.exec_())
+
+    
 
 
 if __name__ == "__main__":
